@@ -1,0 +1,14 @@
+name: astrbot_plugin_netease_browser
+display_name: 网易云适配器
+short_desc: 网易云站内分享、QQ 确认一起听与人格驱动的音乐陪伴
+desc: 搜索歌曲、浏览歌词与评论、站内歌曲分享、先 QQ 确认再发送一起听邀请、房间切歌与暂停、人格自主听歌、语境表达与评论记录管理。
+version: 0.1.0
+author: YepStar
+repo: https://github.com/YepStar/astrbot_plugin_netease_browser
+astrbot_version: ">=4.29.1,<5"
+support_platforms:
+  - aiocqhttp
+tags:
+  - 音乐
+  - 网易云
+  - 陪伴

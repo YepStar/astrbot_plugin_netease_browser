@@ -1,0 +1,157 @@
+{
+  "enabled": {
+    "type": "bool",
+    "description": "启用网易云插件",
+    "default": true
+  },
+  "api_base": {
+    "type": "string",
+    "description": "网易云 API 服务地址",
+    "default": "http://ncm-api:3000"
+  },
+  "owner_umo": {
+    "type": "string",
+    "description": "绑定 QQ 私聊 UMO",
+    "default": ""
+  },
+  "owner_uid": {
+    "type": "string",
+    "description": "接收分享/邀请的网易云 UID",
+    "default": ""
+  },
+  "persona_id": {
+    "type": "string",
+    "description": "自主听歌人格 ID",
+    "default": ""
+  },
+  "provider_id": {
+    "type": "string",
+    "description": "自主决策模型 Provider ID（留空跟随会话）",
+    "default": ""
+  },
+  "browse_enabled": {
+    "type": "bool",
+    "description": "允许 bot 搜索与浏览歌曲",
+    "default": true
+  },
+  "share_enabled": {
+    "type": "bool",
+    "description": "网易云站内歌曲分享",
+    "default": true
+  },
+  "together_enabled": {
+    "type": "bool",
+    "description": "一起听房间与邀请",
+    "default": true
+  },
+  "auto_accept": {
+    "type": "bool",
+    "description": "自动接受绑定用户的一起听邀请",
+    "default": false
+  },
+  "comments_enabled": {
+    "type": "bool",
+    "description": "允许网易云公开评论/回复",
+    "default": false
+  },
+  "autonomous_enabled": {
+    "type": "bool",
+    "description": "人设与陪伴状态驱动的自主听歌",
+    "default": false
+  },
+  "autonomous_share": {
+    "type": "bool",
+    "description": "自主听歌后可私信分享",
+    "default": false
+  },
+  "autonomous_invite": {
+    "type": "bool",
+    "description": "自主听歌后可邀请用户一起听",
+    "default": false
+  },
+  "autonomous_comment": {
+    "type": "bool",
+    "description": "自主听歌后可发表公开评论",
+    "default": false
+  },
+  "qq_notice": {
+    "type": "bool",
+    "description": "允许 QQ 主动消息（确认与人格表达）",
+    "default": true
+  },
+  "start_hour": {
+    "type": "int",
+    "description": "每日活动开始小时（北京时间）",
+    "default": 9
+  },
+  "end_hour": {
+    "type": "int",
+    "description": "每日活动结束小时（北京时间）",
+    "default": 23
+  },
+  "decision_gap_minutes": {
+    "type": "int",
+    "description": "自主决策间隔（分钟）",
+    "default": 120
+  },
+  "daily_listen_limit": {
+    "type": "int",
+    "description": "每天最多自主听歌次数",
+    "default": 5
+  },
+  "daily_outreach_limit": {
+    "type": "int",
+    "description": "每天最多主动分享/邀请次数",
+    "default": 2
+  },
+  "outreach_gap_minutes": {
+    "type": "int",
+    "description": "主动分享/邀请间隔（分钟）",
+    "default": 240
+  },
+  "invite_ttl_minutes": {
+    "type": "int",
+    "description": "邀请房间保留时间（分钟）",
+    "default": 10
+  },
+  "poll_seconds": {
+    "type": "int",
+    "description": "房间状态轮询间隔（秒）",
+    "default": 20
+  },
+  "max_listen_seconds": {
+    "type": "int",
+    "description": "单首最多播放秒数",
+    "default": 600
+  },
+  "offer_ttl_minutes": {
+    "type": "int",
+    "description": "QQ 提议有效时间（分钟）",
+    "default": 15
+  },
+  "join_reminder_seconds": {
+    "type": "int",
+    "description": "接受后未入房提醒等待（秒）",
+    "default": 120
+  },
+  "room_control_enabled": {
+    "type": "bool",
+    "description": "允许一起听切歌、暂停和继续",
+    "default": true
+  },
+  "autonomous_room_control": {
+    "type": "bool",
+    "description": "同房时允许 bot 自主切歌或暂停",
+    "default": true
+  },
+  "room_action_gap_seconds": {
+    "type": "int",
+    "description": "房间自主决策最短间隔（秒）",
+    "default": 180
+  },
+  "room_session_minutes": {
+    "type": "int",
+    "description": "同房活动最长时间（分钟）",
+    "default": 60
+  }
+}
