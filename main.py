@@ -28,7 +28,7 @@ from .music.together import TogetherFlow
 from .web import Panel
 
 
-@register("astrbot_plugin_netease_browser", "YepStar", "网易云适配器", "1.3.6")
+@register("astrbot_plugin_netease_browser", "YepStar", "网易云适配器", "1.3.7")
 class NeteaseBrowser(Star):
     TOOLS = {
         "ncm_search": "browse_enabled",

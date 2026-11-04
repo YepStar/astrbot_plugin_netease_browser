@@ -28,6 +28,9 @@ class MusicService:
         self.own_uid = ""
         self.playback_token = ""
         self.expression = None
+        self.room_clock = None
+        self.room_sync_lock = asyncio.Lock()
+        self.audio_stop_reason = None
 
     def require(self, feature):
         if not self.cfg["enabled"] or not self.cfg[feature]:
@@ -395,6 +398,7 @@ class MusicService:
             }
 
     def start_audio(self, song, url, origin, key=None, offset=0):
+        self.audio_stop_reason = None
         self.playback_token = str(time.time_ns())
         self.store.data.pop("pending_song_switch", None)
         self.current = {**song, "played_seconds": offset, "origin": origin, "status": "playing"}
@@ -455,11 +459,22 @@ class MusicService:
         except asyncio.CancelledError:
             if result is None:
                 consumed = max(0, self.current["played_seconds"] - offset)
-                await self.record_audio_result(song, origin, key, {"played_seconds": consumed, "complete": False}, "interrupted")
+                reason = self.audio_stop_reason
+                status = reason if origin == "together" and reason in {
+                    "paused", "switched", "resynced", "room_left", "room_ended"
+                } else "interrupted"
+                await self.record_audio_result(song, origin, key, {
+                    "played_seconds": consumed, "complete": False,
+                    "offset_seconds": offset, "stop_reason": reason or "cancelled",
+                }, status)
             raise
         except Exception as exc:
-            if key:
-                self.store.finish(key, "failed", error=type(exc).__name__)
+            consumed = max(0, self.current["played_seconds"] - offset)
+            await self.record_audio_result(song, origin, key, {
+                "played_seconds": consumed, "complete": False,
+                "offset_seconds": offset, "error": type(exc).__name__,
+                "stop_reason": "audio_error",
+            }, "failed")
         finally:
             self.current = None
             try:
@@ -468,12 +483,43 @@ class MusicService:
                 pass
 
     async def tick_room(self):
+        # Tools and the background loop may poll at the same time.
+        async with self.room_sync_lock:
+            await self._tick_room()
+
+    def room_progress(self, room_id, command):
+        """Estimate from the last *command*, not a live server playback clock.
+
+        Re-reading a command with progress=0 never resets its monotonic anchor.
+        Sequence IDs distinguish a real new seek/replay with the same progress.
+        This estimate is not evidence of consumed audio; only ffmpeg is.
+        """
+        fingerprint = json.dumps({k: command.get(k) for k in (
+            "targetSongId", "formerSongId", "playStatus", "progress",
+            "commandType", "clientSeq", "serverSeq", "userId", "outerId",
+        )}, sort_keys=True)
+        now = time.monotonic()
+        changed = (not self.room_clock or self.room_clock["room_id"] != room_id
+                   or self.room_clock["command"] != fingerprint)
+        if changed:
+            self.room_clock = {
+                "room_id": room_id, "command": fingerprint,
+                "progress_ms": max(0, int(command.get("progress") or 0)),
+                "at": now,
+            }
+        progress = self.room_clock["progress_ms"]
+        if command.get("playStatus") == "PLAY":
+            progress += max(0, now - self.room_clock["at"]) * 1000
+        return int(progress), changed
+
+    async def _tick_room(self):
         if not self.cfg["enabled"] or not self.cfg["together_enabled"]:
             if self.store.data.get("room"):
                 await self.end_room()
             return
         room = self.store.data.get("room")
         if not room:
+            self.room_clock = None
             if self.cfg["auto_accept"] and self.cfg["owner_uid"]:
                 await self.accept("auto_accept:" + str(int(time.time() // 60)))
             return
@@ -484,8 +530,9 @@ class MusicService:
             self.store.data["room"] = None
             self.store.save()
             self.room_snapshot = {}
+            self.room_clock = None
             if self.current and self.current["origin"] == "together":
-                await self.stop_audio()
+                await self.stop_audio(reason="room_left")
             return
         members = {str(u.get("userId")) for u in actual.get("roomUsers", [])}
         if self.cfg["owner_uid"] in members and not room.get("joined_at"):
@@ -517,12 +564,16 @@ class MusicService:
         old = self.room_snapshot
         old_sid = (old.get("song") or {}).get("id")
         song = await self.api.detail(numeric(sid)) if sid and sid != "0" else None
-        progress = int(command.get("progress") or 0)
+        had_command = bool(self.room_clock and self.room_clock["room_id"] == room["id"])
+        progress, command_changed = self.room_progress(room["id"], command)
+        if song and song.get("duration_ms", 0) > 0:
+            progress = min(progress, song["duration_ms"])
         status = command.get("playStatus") or "PAUSE"
         self.room_snapshot = {
             "room_id": room["id"],
             "song": song,
             "progress_ms": progress,
+            "progress_source": "command_estimate",
             "play_status": status,
             "users": [
                 {"uid": str(x.get("userId", "")), "nickname": x.get("nickname", "")}
@@ -537,27 +588,34 @@ class MusicService:
         if song:
             local = self.current
             if status != "PLAY" and local and local["origin"] == "together":
-                await self.stop_audio()
+                await self.stop_audio(reason="paused")
                 # A remote pause belongs to the human; autonomous decisions must respect it.
                 room["last_control_actor"] = "user"
                 self.store.save()
             elif status == "PLAY" and (
                 (
                     (old_sid != sid or old.get("play_status") == "PAUSE")
-                    and (not local or local.get("id") != sid)
+                    and (not local or local.get("id") != sid
+                         or local.get("origin") != "together")
                 )
                 or (
                     local
                     and local["origin"] == "together"
+                    and had_command
+                    and command_changed
                     and abs(local["played_seconds"] * 1000 - progress) > 20000
                 )
             ):
-                await self.stop_audio()
+                reason = "switched" if local and local.get("id") != sid else "resynced"
+                await self.stop_audio(reason=reason)
                 url = await self.api.audio(sid)
                 self.start_audio(song, url, "together", offset=progress / 1000)
             heartbeat_progress = progress
             if self.current and self.current["id"] == sid and status == "PLAY":
                 heartbeat_progress = int(self.current["played_seconds"] * 1000)
+                self.room_snapshot.update(
+                    progress_ms=heartbeat_progress, progress_source="local_audio"
+                )
             await self.api.call(
                 "listentogether/heatbeat",
                 roomId=room["id"],
@@ -572,7 +630,7 @@ class MusicService:
             )
 
     async def control(self, action, reason, key, song_id="", actor="user"):
-        async with self.lock:
+        async with self.room_sync_lock, self.lock:
             self.require("together_enabled")
             if not self.cfg["room_control_enabled"]:
                 raise ValueError("房间控制已关闭")
@@ -658,9 +716,12 @@ class MusicService:
             room["last_control_reason"] = reason[:200]
             room["last_control_at"] = time.time()
             self.store.finish(key, "applied")
-            await self.stop_audio()
+            await self.stop_audio(reason={
+                "pause": "paused", "switch": "switched", "resume": "resynced",
+            }[action])
             if url:
                 self.start_audio(song, url, "together", offset=progress / 1000)
+            self.room_progress(room["id"], applied)
             self.room_snapshot.update(
                 song=song,
                 progress_ms=progress,
@@ -696,11 +757,13 @@ class MusicService:
             self.store.data["room"] = None
             self.store.save()
             self.room_snapshot = {}
+            self.room_clock = None
             if self.current and self.current["origin"] == "together":
-                await self.stop_audio()
+                await self.stop_audio(reason="room_ended")
             return {"status": "ended"}
 
-    async def stop_audio(self):
+    async def stop_audio(self, reason=None):
+        self.audio_stop_reason = reason
         if self.play_task and not self.play_task.done():
             self.play_task.cancel()
             await asyncio.gather(self.play_task, return_exceptions=True)

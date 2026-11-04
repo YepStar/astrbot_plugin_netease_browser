@@ -40,7 +40,7 @@
     }
   }
   const sourceStatus={ok:'正常',disabled:'已关闭',unavailable:'不可用',unsupported:'不支持读取接口',denied:'未获会话读取授权',persona_mismatch:'人格不匹配',invalid_response:'接口返回无效'};
-  const statuses={switch_deferred:'暂不切歌，等待用户再次要求',pending:'进行中',sent:'已发送',unknown:'结果不确定',failed:'失败',completed:'播放完成',partial:'部分播放',interrupted:'播放中断',accepted:'已加入',posted:'已发表',applied:'已执行',declined:'已拒绝'};
+  const statuses={switch_deferred:'暂不切歌，等待用户再次要求',pending:'进行中',sent:'已发送',unknown:'结果不确定',failed:'失败',completed:'播放完成',partial:'部分播放',interrupted:'播放中断',paused:'一起听已暂停',switched:'一起听已切歌',resynced:'一起听进度同步',room_left:'已离开一起听房间',room_ended:'一起听已结束',accepted:'已加入',posted:'已发表',applied:'已执行',declined:'已拒绝'};
   function render(){
     const song=state.playback||state.room?.song;
     $('account').textContent=state.account?.nickname|| (state.configured?'已保存登录，请验证':'尚未登录');
@@ -71,7 +71,7 @@
     $('autonomy').textContent=state.autonomy||'暂无活动';
     $('room').textContent=state.room?.room_id?JSON.stringify(state.room,null,2):'未连接一起听房间';
     $('observations').replaceChildren();
-    for(const r of state.observations){const n=el('article',null,'entry');n.append(el('b',r.song?.name||r.song_id),el('p',r.note||statuses[r.status]||r.status),el('small',new Date(r.at*1000).toLocaleString('zh-CN')+' · '+Math.floor(r.played_seconds||0)+' 秒'));$('observations').append(n);}
+    for(const r of state.observations){const n=el('article',null,'entry');n.append(el('b',r.song?.name||r.song_id),el('p',r.note||(r.status==='interrupted'&&r.origin==='together'&&!r.stop_reason?'旧版：本地解码中断，原因未记录':statuses[r.status]||r.status)),el('small',new Date(r.at*1000).toLocaleString('zh-CN')+' · '+Math.floor(r.played_seconds||0)+' 秒'));$('observations').append(n);}
     if(!state.observations.length)$('observations').append(el('p','还没有播放记录。','hint'));
     $('receipts').replaceChildren();
     for(const r of state.recent){const n=el('article',null,'entry');n.append(el('b',({share:'歌曲分享',invite:'一起听邀请',listen:'歌曲播放',accept:'接受邀请',comment:'公开评论',together_proposal:'QQ一起听提议',together_reply:'一起听确认',join_reminder:'入房提醒',room_control:'房间播放控制'}[r.kind]||r.kind)+' · '+(statuses[r.status]||r.status)),el('p','歌曲 / 房间 '+(r.song_id||r.room_id||'—')),el('small',new Date(r.at*1000).toLocaleString('zh-CN')));$('receipts').append(n);}

@@ -151,7 +151,8 @@ async def test_failed_audio_not_claimed_completed(setup):
     _,s,api,svc=setup;svc.player.play.side_effect=RuntimeError('decode')
     await svc.listen('101','play');await svc.play_task
     assert s.data['operations']['play']['status']=='failed'
-    assert not s.data['observations']
+    assert s.data['observations'][-1]['status']=='failed'
+    assert s.data['observations'][-1]['complete'] is False
     assert svc.companion.activity.call_args.args[0] == 'ended'
 
 @pytest.mark.asyncio
