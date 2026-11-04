@@ -54,10 +54,7 @@ class TogetherFlow:
             self.store.reserve(
                 key, "together_proposal", song_id=song["id"], offer_id=offer["id"]
             )
-            text = f"想和你一起听《{song['name']}》— {song['artists']}。"
-            if message.strip():
-                text += "\n" + message[:200]
-            text += "\n要现在一起听吗？你答应后，我再把邀请发到网易云。"
+            text = message.strip()[:200] or f"刚听到《{song['name']}》，想和你一起听会儿。"
             status = await self.service.notice(text)
             offer["qq_status"] = status
             if status != "sent":
@@ -145,7 +142,7 @@ class TogetherFlow:
             room["reminded_at"] = time.time()
             self.store.save()
             status = await self.service.notice(
-                "我在网易云房间里等你呢，刚才的邀请链接在网易云私信里。忙的话也没关系，等你方便。"
+                "我还在网易云等你呢，有空就过来一起听会儿。"
             )
             self.store.finish(key, "sent" if status == "sent" else "unknown")
 

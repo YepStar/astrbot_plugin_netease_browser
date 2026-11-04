@@ -17,6 +17,7 @@ def plugin(tmp_path,monkeypatch):
     monkeypatch.setattr(module.StarTools,'get_data_dir',lambda name:tmp_path)
     cfg={'owner_umo':'qq_bot:FriendMessage:12','owner_uid':'55'}
     p=module.NeteaseBrowser(MagicMock(),cfg)
+    p.music_request_actions=AsyncMock(return_value=frozenset({'listen','share','together','browse'}))
     p.store.save_cookie('test')
     p.service.own_uid='99'
     return p
@@ -164,3 +165,14 @@ async def test_room_pause_adapter_passes_action_without_argument_collision(plugi
     assert out['status']=='applied'
     assert plugin.service.control.await_args.kwargs['action']=='pause'
     assert plugin.service.control.await_args.kwargs['reason']=='先聊两句'
+
+@pytest.mark.asyncio
+async def test_song_direction_is_restored_in_next_turn_and_scoped(plugin):
+    plugin.store.reserve('outgoing','share',song_id='101',recipient='55')
+    plugin.store.finish('outgoing','sent')
+    req=SimpleNamespace(system_prompt='persona')
+    await plugin.inject_music_action_facts(event(),req)
+    assert 'bot_to_user' in req.system_prompt and '101' in req.system_prompt
+    other=SimpleNamespace(system_prompt='other persona')
+    await plugin.inject_music_action_facts(event('qq_bot:FriendMessage:88'),other)
+    assert other.system_prompt == 'other persona'

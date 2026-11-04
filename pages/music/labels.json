@@ -29,5 +29,7 @@
   "room_control_enabled": "允许一起听切歌、暂停和继续",
   "autonomous_room_control": "同房时允许 bot 自主切歌或暂停",
   "room_action_gap_seconds": "房间自主决策最短间隔（秒）",
-  "room_session_minutes": "同房活动最长时间（分钟）"
+  "room_session_minutes": "同房活动最长时间（分钟）",
+  "memory_read_enabled": "允许读取记忆",
+  "memory_plugin": "记忆插件"
 }

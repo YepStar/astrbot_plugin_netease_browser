@@ -4,6 +4,7 @@ import asyncio
 import hashlib
 import json
 import shutil
+import time
 from contextvars import ContextVar
 
 from astrbot.api import logger
@@ -16,15 +17,18 @@ from .music.autonomy import Autonomy, parse_json
 from .music.companion import CompanionPort
 from .music.config import DEFAULTS, validate
 from .music.expression import ExpressionPolicy
+from .music.facts import local_time, recent_share_context
 from .music.memory import MemoryPort
 from .music.player import AudioPlayer
+from .music.preferences import MusicPreferences
+from .music.requests import ACTION_TO_TOOL, MUSIC_REQUEST_GUIDE, request_actions
 from .music.service import MusicService
 from .music.storage import Store
 from .music.together import TogetherFlow
 from .web import Panel
 
 
-@register("astrbot_plugin_netease_browser", "YepStar", "网易云适配器", "0.1.0", "https://github.com/YepStar/astrbot_plugin_netease_browser")
+@register("astrbot_plugin_netease_browser", "YepStar", "网易云适配器", "1.3.6")
 class NeteaseBrowser(Star):
     TOOLS = {
         "ncm_search": "browse_enabled",
@@ -61,6 +65,7 @@ class NeteaseBrowser(Star):
         )
         self.service.expression = self.expression.decide
         self.flow = TogetherFlow(self.settings, self.store, self.service)
+        self.preferences = MusicPreferences(self.settings, self.store, self.context, self.generate)
         self.autonomy = Autonomy(
             self.settings,
             self.store,
@@ -68,6 +73,7 @@ class NeteaseBrowser(Star):
             self.companion,
             self.generate,
             flow=self.flow,
+            preferences=self.preferences,
         )
         self.panel = Panel(self)
         self.account_view = {}
@@ -157,9 +163,12 @@ class NeteaseBrowser(Star):
         except Exception:
             sources["companion"] = "unavailable"
         query = "音乐陪伴 分享歌曲 切歌 暂停 安静相处 主动表达 解释 偏好 关系"
-        memory = await MemoryPort(self.context).recall(
-            scope["owner_umo"], scope["persona_id"], query
-        )
+        memory = {"status": "disabled", "memories": []}
+        if self.settings["memory_read_enabled"]:
+            memory = await MemoryPort(self.context).recall(
+                scope["owner_umo"], scope["persona_id"], query,
+                plugin_name=self.settings["memory_plugin"],
+            )
         sources["memory"] = memory.get("status", "unavailable")
         recent = []
         try:
@@ -207,6 +216,19 @@ class NeteaseBrowser(Star):
             return "scope_changed"
         return await self.notice(text)
 
+    @filter.on_llm_request(priority=-260000)
+    async def inject_music_action_facts(self, event, req):
+        if not self.settings["enabled"] or event.unified_msg_origin != self.settings["owner_umo"]:
+            return
+        self.preferences.capture(
+            getattr(event, "message_str", ""),
+            getattr(event.message_obj, "message_id", ""),
+        )
+        req.system_prompt = (req.system_prompt or "") + "\n" + MUSIC_REQUEST_GUIDE
+        facts = recent_share_context(self.store.data, self.settings["owner_uid"])
+        if facts:
+            req.system_prompt = (req.system_prompt or "") + "\n" + facts
+
     async def notice(self, text):
         if not self.settings["qq_notice"] or not self.settings["owner_umo"]:
             return "disabled"
@@ -225,7 +247,8 @@ class NeteaseBrowser(Star):
                             cid,
                             {
                                 "role": "user",
-                                "content": "[系统事件：网易云活动主动消息，非用户发言]",
+                                "content": "[系统事件：机器人在 " + local_time(time.time())
+                                + " 主动发送网易云活动消息；发送方=机器人，接收方=用户，非用户发言]",
                             },
                             {"role": "assistant", "content": text},
                         )
@@ -285,6 +308,15 @@ class NeteaseBrowser(Star):
             (event.unified_msg_origin + ":" + identity + ":" + action).encode()
         ).hexdigest()
 
+    async def music_request_actions(self, event):
+        event._ncm_pending_switch = self.service.pending_switch()
+        async def recent():
+            try:
+                return await self.preferences.dialogue()
+            except Exception:
+                return []
+        return await request_actions(event, self.generate, recent)
+
     async def run_action(self, event, operation, **args):
         action = operation
         if not self.allowed(event):
@@ -293,10 +325,24 @@ class NeteaseBrowser(Star):
                 ensure_ascii=False,
             )
         try:
+            requested = None
+            if action in ("search", "share", "propose", "listen"):
+                requested = await self.music_request_actions(event)
+                required = {"share": "share", "propose": "together", "listen": "listen"}.get(action)
+                if required and required not in requested:
+                    return json.dumps({
+                        "status": "intent_mismatch",
+                        "requested_actions": sorted(requested),
+                        "next_tools": [ACTION_TO_TOOL[name] for name in sorted(requested) if name in ACTION_TO_TOOL],
+                        "reason": "当前用户没有授权这个音乐动作。推荐你听是机器人自己播放，推荐给我才是分享。按next_tools及真实候选继续；没有明确动作则澄清，不得声称播放或发送成功。",
+                    }, ensure_ascii=False)
             if action in ("share", "propose", "listen") or (
                 action == "control" and args.get("action") == "switch"
             ):
-                known = getattr(event, "_ncm_candidates", set())
+                known = set(getattr(event, "_ncm_candidates", set()))
+                pending = self.service.pending_switch() if action == "listen" else None
+                if pending:
+                    known.add(pending["song"]["id"])
                 if args["song_id"] not in known:
                     raise ValueError(
                         "先用 ncm_search 搜索真实候选，再选择对应歌曲 ID；不要猜 ID"
@@ -319,8 +365,13 @@ class NeteaseBrowser(Star):
                 result = await method(**args)
             finally:
                 self.interaction.reset(token)
+            if action == "listen":
+                event._ncm_listen_outcome = result
             if action == "search":
                 event._ncm_candidates = {x["id"] for x in result["songs"]}
+                result["requested_actions"] = sorted(requested)
+                result["next_tools"] = [ACTION_TO_TOOL[name] for name in sorted(requested) if name in ACTION_TO_TOOL]
+                result["action_note"] = "按当前用户授权方向调用next_tools；listen让机器人自己播放，不能换成分享。仅搜索不等于已经播放，不要声称听过。"
             elif action == "read":
                 event._ncm_read_songs = getattr(event, "_ncm_read_songs", set()) | {
                     str(args["song_id"])
@@ -341,7 +392,7 @@ class NeteaseBrowser(Star):
 
     @filter.llm_tool(name="ncm_search")
     async def ncm_search(self, event: AstrMessageEvent, query: str):
-        """按用户当前想法、心情或明确歌名搜索网易云真实歌曲。推荐、分享、主动邀请前先调用；不使用日推，不猜歌曲ID。普通闲聊、否定、引用示例时不调用。返回候选后由主Agent选曲，再调用ncm_share或ncm_invite。
+        """按用户当前想法、心情或明确歌名搜索网易云真实歌曲。自己听、推荐给用户、分享或主动邀请前先调用。推荐你听/给你推荐是用户让机器人听，后续ncm_listen；推荐我听/发给我是ncm_share；一起听才ncm_invite。根据返回的requested_actions和next_tools继续，不偷换动作。不使用日推，不猜歌曲ID；按用户指定歌手选择，版本不明确且候选混淆时澄清。普通闲聊、否定、引用示例不调用。
 
         Args:
             query(string): 基于当前意图的搜索词，可包含歌名、歌手或风格，最多160字。
@@ -359,7 +410,7 @@ class NeteaseBrowser(Star):
 
     @filter.llm_tool(name="ncm_share")
     async def ncm_share(self, event: AstrMessageEvent, song_id: str, message: str = ""):
-        """用户希望推荐/分享音乐时，在本轮ncm_search之后选择真实候选，通过网易云站内私信分享给面板绑定用户，；是否在QQ开口由人格、陪伴状态和长期记忆判断，可保持安静。收件人固定，不能改成其他人；不发QQ歌曲卡片。只在真实分享意图下调用，不在否定或示例时执行。unknown/duplicate不重试。
+        """仅当用户让机器人推荐给用户/分享给用户时，在本轮ncm_search之后选择真实候选，通过网易云站内私信分享给面板绑定用户；是否在QQ开口由人格、陪伴状态和长期记忆判断，可保持安静。收件人固定，不能改成其他人；不发QQ歌曲卡片。推荐你听/建议你先听/给你推荐一首是机器人自己听，用ncm_listen，不能调用本工具。只在真实向用户分享意图下调用，不在否定或示例时执行。unknown/duplicate不重试。
 
         Args:
             song_id(string): 本轮ncm_search返回的候选歌曲ID。
@@ -373,7 +424,7 @@ class NeteaseBrowser(Star):
 
         Args:
             song_id(string): 本轮ncm_search返回的真实候选歌曲ID。
-            message(string): 简短自然的一起听邀请文字。
+            message(string): 只写一句自然的一起听邀请，不添加“你答应后我再发邀请”等执行流程说明，不重复曲目标题和询问。
         """
         return await self.run_action(event, "propose", song_id=song_id, message=message)
 
@@ -390,6 +441,9 @@ class NeteaseBrowser(Star):
             if offer
             else None,
             "room": self.service.room_snapshot,
+            "pending_song_switch": self.service.pending_switch(),
+            "playback": self.service.current,
+            "switch_rule": "机器人单独听歌时，第一次要求换歌会提醒先听完；用户下一条明确再次要求换歌，可用pending_song_switch.song.id调用ncm_listen继续，不必重搜。不要把含糊回答、否定或同一条消息重试算作再次要求。",
             "rule": "仅当当前用户原话接受这份提议时才调用ncm_reply_together accept=true；拒绝用false，等会儿/不确定不发送。已邀请/已进房不是再次确认。",
         }
 
@@ -442,7 +496,7 @@ class NeteaseBrowser(Star):
 
     @filter.llm_tool(name="ncm_listen")
     async def ncm_listen(self, event: AstrMessageEvent, song_id: str):
-        """让机器人自己实时读取解码一首歌曲。本轮先ncm_search；仅在明确让机器人自己听时使用。started表示开始，不能声称听完，也不表示模型理解了音频。自主选曲通常由人设与陪伴活动调度，无需用户调用。
+        """让机器人自己实时读取解码一首歌曲。本轮先ncm_search；用户推荐你先听/建议你听听/给你推荐指定歌也属于让机器人听，应调用本工具而非ncm_share。started表示开始，不能声称听完，也不表示模型理解了音频。自主选曲通常由人设与陪伴活动调度，无需用户调用。当前歌未完时第一次换歌返回switch_deferred，应直接使用user_reply，不能同一消息再次调用；用户后续再次要求才切换，可使用pending_song_switch.song.id。
 
         Args:
             song_id(string): 本轮ncm_search返回的真实候选歌曲ID。

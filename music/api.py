@@ -29,7 +29,8 @@ class NcmApi:
         params["timestamp"] = time.time_ns() // 1000000
         try:
             async with self.session.post(
-                self.config["api_base"] + "/" + path, data=params
+                self.config["api_base"] + "/" + path,
+                params={"timestamp": time.time_ns()}, data=params
             ) as response:
                 body = await response.json(content_type=None)
                 if response.status != 200 or not isinstance(body, dict):

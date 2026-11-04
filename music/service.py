@@ -4,9 +4,10 @@ import asyncio
 import json
 import re
 import time
-from urllib.parse import parse_qs, unquote, urlencode, urlparse
+from urllib.parse import parse_qs, unquote, urlparse
 
 from .api import ApiError
+from .facts import outbound_share
 
 
 def numeric(value):
@@ -25,6 +26,7 @@ class MusicService:
         self.current = None
         self.room_snapshot = {}
         self.own_uid = ""
+        self.playback_token = ""
         self.expression = None
 
     def require(self, feature):
@@ -92,7 +94,15 @@ class MusicService:
             if self.store.receipt(key):
                 return self.store.receipt(key)
             song = await self.api.detail(sid)
-            self.store.reserve(key, "share", song_id=sid, recipient=uid)
+            facts = outbound_share(song, uid, self.own_uid)
+            facts["listening_confirmed"] = bool(
+                self.current and self.current.get("id") == sid
+                and self.current.get("played_seconds", 0) > 0
+            )
+            self.store.reserve(
+                key, "share", song_id=sid, recipient=uid, song=song,
+                actor="bot", direction="bot_to_user", sender_uid=self.own_uid,
+            )
             try:
                 await self.api.call(
                     "send/song", user_ids=uid, id=sid, msg=message[:300]
@@ -103,13 +113,14 @@ class MusicService:
             self.store.finish(key, "sent")
             expression = await self.report(
                 "song_shared",
-                {"status": "sent", "song": song, "private_message": message[:300]},
+                {**facts, "status": "sent", "private_message": message[:300]},
                 key,
             )
             return {
                 "status": "sent",
                 "song": song,
                 "channel": "netease_private",
+                "action_facts": facts,
                 "qq_notice": expression["delivery"],
                 "expression": expression,
             }
@@ -179,15 +190,12 @@ class MusicService:
                     progress=0,
                     clientSeq=1,
                 )
-                link = "https://st.music.163.com/listen-together/share/?" + urlencode(
-                    {"songId": sid, "roomId": rid, "inviterId": self.own_uid}
-                )
+                # Official macOS 3.1.4 client uses this endpoint and these two fields.
+                # Reuse the API gateway; do not forge a private-message card or send a link.
                 await self.api.call(
-                    "send/text",
-                    user_ids=uid,
-                    msg=(message[:160] or f"想和你一起听《{song['name']}》")
-                    + "\n"
-                    + link,
+                    "api",
+                    uri="/api/listen/together/invite/message/send",
+                    data=json.dumps({"roomId": str(rid), "acceptorId": uid}),
                 )
             except BaseException:
                 self.store.finish(key, "unknown")
@@ -201,7 +209,7 @@ class MusicService:
                         pass
                 raise
             self.store.data["room"]["invited_at"] = time.time()
-            self.store.finish(key, "sent", room_id=str(rid))
+            self.store.finish(key, "sent", room_id=str(rid), channel="netease_native_invite")
             self.start_audio(song, url, origin="together")
             expression = await self.report(
                 "invitation_sent",
@@ -211,7 +219,7 @@ class MusicService:
             return {
                 "status": "sent",
                 "room_id": str(rid),
-                "channel": "netease_private_link",
+                "channel": "netease_native_invite",
                 "qq_notice": expression["delivery"],
                 "expression": expression,
             }
@@ -325,28 +333,97 @@ class MusicService:
             self.store.finish(key, "posted", comment_id=cid, posted_at=time.time())
             return {"status": "posted", "comment_id": cid}
 
+    def pending_switch(self):
+        pending = self.store.data.get("pending_song_switch")
+        if (
+            not isinstance(pending, dict) or not self.current
+            or pending.get("playback_token") != self.playback_token
+            or pending.get("owner_umo") != self.cfg["owner_umo"]
+            or pending.get("persona_id") != self.cfg.get("persona_id", "")
+        ):
+            return None
+        return pending
+
     async def listen(self, song_id, key, origin="requested"):
         async with self.lock:
             self.require("browse_enabled")
             sid = numeric(song_id)
-            if self.store.receipt(key):
+            previous = self.store.data["operations"].get(key)
+            if previous:
+                if previous.get("status") == "switch_deferred":
+                    return {"status": "switch_deferred", "user_reply": previous["user_reply"], "song": previous.get("song"), "duplicate": True}
                 return self.store.receipt(key)
-            if self.play_task and not self.play_task.done():
-                return {"status": "player_busy"}
+            busy = bool(self.play_task and not self.play_task.done())
+            if busy and self.current and self.current.get("status") == "finished":
+                await asyncio.gather(self.play_task, return_exceptions=True)
+                busy = False
+            old = dict(self.current or {})
+            switching = False
+            if busy:
+                if origin != "requested":
+                    return {"status": "player_busy", "note": "当前播放未结束，不重复安排。"}
+                if old.get("origin") == "together" or self.store.data.get("room"):
+                    return {"status": "room_busy", "user_reply": "我们还在一起听呢，切歌要在当前房间里换。"}
+                if old.get("id") == sid:
+                    return {"status": "already_playing", "song": old, "user_reply": "这首已经在放啦，我接着听。"}
+                pending = self.pending_switch()
+                if not pending:
+                    song = await self.api.detail(sid)
+                    reply = "哎呀，刚才那首《" + str(old.get("name") or "歌") + "》还没放完呢，让我先听完啦。"
+                    self.store.reserve(key, "listen", song_id=sid, song=song, origin=origin)
+                    self.store.finish(key, "switch_deferred", user_reply=reply)
+                    self.store.data["pending_song_switch"] = {
+                        "playback_token": self.playback_token, "first_request_key": key,
+                        "song": song, "owner_umo": self.cfg["owner_umo"],
+                        "persona_id": self.cfg.get("persona_id", ""), "at": time.time(),
+                    }
+                    self.store.save()
+                    return {"status": "switch_deferred", "song": song, "current_song": old, "user_reply": reply, "note": "本次没有切歌。使用user_reply回应；同一条用户消息重试不算再次要求，不要自动再调用。"}
+                switching = pending["first_request_key"] != key
+            # Confirm that the new song is playable before interrupting the old one.
             song = await self.api.detail(sid)
             url = await self.api.audio(sid)
+            if switching:
+                await self.stop_audio()
             self.store.reserve(key, "listen", song_id=sid, origin=origin)
             self.start_audio(song, url, origin=origin, key=key)
+            reply = ("好，那我先换成《" if switching else "好，我开始听《") + song["name"] + "》啦。"
             return {
-                "status": "started",
-                "song": song,
-                "note": "实时读取和解码音频；完成状态以播放回执为准，不代表模型已理解音频。",
+                "status": "started", "song": song, "switched": switching,
+                "user_reply": reply,
+                "note": "已启动实时音频解码；是否听完以完成回执为准，不编造听感。",
             }
 
     def start_audio(self, song, url, origin, key=None, offset=0):
-        self.play_task = asyncio.create_task(
-            self._audio(song, url, origin, key, offset)
-        )
+        self.playback_token = str(time.time_ns())
+        self.store.data.pop("pending_song_switch", None)
+        self.current = {**song, "played_seconds": offset, "origin": origin, "status": "playing"}
+        self.play_task = asyncio.create_task(self._audio(song, url, origin, key, offset))
+
+    async def record_audio_result(self, song, origin, key, result, status):
+        if key:
+            self.store.finish(key, status, **result)
+        observation = {
+            "at": time.time(), "song": song, "status": status, "origin": origin,
+            "operation_key": key, **result,
+            "scrobble": {"status": "pending" if result["played_seconds"] >= 30 else "skipped"},
+        }
+        self.store.data["observations"].append(observation)
+        self.store.save()
+        report = {"status": "skipped", "reason": "under_30_seconds"}
+        if result["played_seconds"] >= 30:
+            try:
+                response = await self.api.call("scrobble", id=song["id"], sourceid=0, time=int(result["played_seconds"]))
+                details = response.get("details") or {}
+                codes = {event: (details.get(event) or {}).get("code") for event in ("startplay", "play")}
+                report = {"status": "accepted" if all(code == 200 for code in codes.values()) else "unconfirmed", "codes": codes}
+            except Exception as exc:
+                report = {"status": "failed", "error": type(exc).__name__}
+        report["at"] = time.time()
+        observation["scrobble"] = report
+        if key:
+            self.store.data["operations"][key]["scrobble"] = report
+        self.store.save()
 
     async def _audio(self, song, url, origin, key, offset=0):
         self.current = {
@@ -361,6 +438,7 @@ class MusicService:
             max(1, (song["duration_ms"] / 1000 or 180) - offset),
             self.cfg["max_listen_seconds"],
         )
+        result = None
         try:
             self.companion.activity("started", aid, user_id, song, played_seconds=0)
 
@@ -371,36 +449,13 @@ class MusicService:
                 )
 
             result = await self.player.play(url, seconds, progress, offset=offset)
+            self.current["status"] = "finished"
             status = "completed" if result["complete"] else "partial"
-            if key:
-                self.store.finish(key, status, **result)
-            self.store.data["observations"].append(
-                {
-                    "at": time.time(),
-                    "song": song,
-                    "status": status,
-                    "origin": origin,
-                    "operation_key": key,
-                    **result,
-                }
-            )
-            self.store.save()
-            # Only report consumed audio, never synthesize time or manipulate daily recommendations.
-            if result["played_seconds"] >= 30:
-                try:
-                    await self.api.call(
-                        "scrobble",
-                        id=song["id"],
-                        sourceid=0,
-                        time=int(result["played_seconds"]),
-                    )
-                except Exception:
-                    pass
+            await self.record_audio_result(song, origin, key, result, status)
         except asyncio.CancelledError:
-            if key:
-                self.store.finish(
-                    key, "interrupted", played_seconds=self.current["played_seconds"]
-                )
+            if result is None:
+                consumed = max(0, self.current["played_seconds"] - offset)
+                await self.record_audio_result(song, origin, key, {"played_seconds": consumed, "complete": False}, "interrupted")
             raise
         except Exception as exc:
             if key:
@@ -650,3 +705,6 @@ class MusicService:
             self.play_task.cancel()
             await asyncio.gather(self.play_task, return_exceptions=True)
         await self.player.stop()
+        self.playback_token = ""
+        self.store.data.pop("pending_song_switch", None)
+        self.store.save()

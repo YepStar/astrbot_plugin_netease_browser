@@ -79,7 +79,7 @@ async def test_no_write_without_gate_or_recipient(setup,change):
     api.call.assert_not_awaited()
 
 @pytest.mark.asyncio
-async def test_invite_sequence_and_link(setup):
+async def test_invite_sequence_and_native_invitation(setup):
     cfg,s,api,svc=setup
     s.data['together_offer']={'id':'consent','status':'accepted','song':SONG,'recipient':'55','owner_umo':'qq_bot:FriendMessage:12'}
     async def call(path,**kw):
@@ -90,9 +90,12 @@ async def test_invite_sequence_and_link(setup):
     assert result['status']=='sent'
     calls=api.call.await_args_list
     paths=[c.args[0] for c in calls]
-    assert paths.index('listentogether/room/create')<paths.index('send/text')
-    text=next(c.kwargs['msg'] for c in calls if c.args[0]=='send/text')
-    assert 'roomId=123' in text and 'inviterId=99' in text
+    assert paths.index('listentogether/room/create')<paths.index('api')
+    native=next(c for c in calls if c.args[0]=='api')
+    assert native.kwargs['uri']=='/api/listen/together/invite/message/send'
+    assert json.loads(native.kwargs['data'])=={'roomId':'123','acceptorId':'55'}
+    assert 'send/text' not in paths
+    assert result['channel']=='netease_native_invite'
     await svc.play_task
     assert svc.notice.await_count==0
 
@@ -102,7 +105,7 @@ async def test_invite_timeout_preserves_unknown_and_closes_owned(setup):
     s.data['together_offer']={'id':'consent','status':'accepted','song':SONG,'recipient':'55','owner_umo':'qq_bot:FriendMessage:12'}
     async def call(path,**kw):
         if path=='listentogether/room/create':return {'data':{'roomInfo':{'roomId':'123'}}}
-        if path=='send/text':raise ApiError()
+        if path=='api':raise ApiError()
         return {'code':200}
     api.call.side_effect=call
     with pytest.raises(ApiError):await svc.invite('101','x','key',consent_id='consent')
@@ -202,3 +205,28 @@ async def test_player_rejects_arbitrary_host():
 @pytest.mark.parametrize('raw',['[]','bad','```json\n[]\n```'])
 def test_invalid_model_output(raw):
     with pytest.raises((ValueError,json.JSONDecodeError)):parse_json(raw)
+
+@pytest.mark.asyncio
+async def test_share_passes_authoritative_direction_to_expression(setup):
+    _, store, api, service = setup
+    service.expression = AsyncMock(return_value={'mode':'silent','delivery':'silent'})
+    result = await service.share('101','给你听','direction-case')
+    facts = service.expression.await_args.args[1]
+    assert facts['actor'] == 'bot' and facts['direction'] == 'bot_to_user'
+    assert facts['sender_uid'] == '99' and facts['recipient_uid'] == '55'
+    assert facts['occurred_at_local'].endswith('+08:00')
+    assert result['action_facts'] == {k:v for k,v in facts.items() if k not in ('status','private_message')}
+    assert store.data['operations']['direction-case']['song']['name'] == SONG['name']
+
+
+def test_context_recovers_legacy_shares_without_inventing_inbound_events():
+    from music.facts import recent_share_context
+    rows = {
+        'legacy':{'kind':'share','status':'sent','at':1793416068,'song_id':'533221259','recipient':'55'},
+        'uncertain':{'kind':'share','status':'unknown','at':1793495253,'recipient':'55'},
+        'other':{'kind':'share','status':'sent','at':1793495253,'recipient':'999'},
+    }
+    text = recent_share_context({'operations':rows},'55',now=1793495253)
+    assert '533221259' in text and 'bot_to_user' in text and '机器人自己选歌' in text
+    assert '999' not in text
+    assert recent_share_context({'operations':rows},'different') == ''

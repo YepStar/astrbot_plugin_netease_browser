@@ -10,6 +10,8 @@ DEFAULTS = {
     "owner_uid": "",
     "persona_id": "",
     "provider_id": "",
+    "memory_read_enabled": False,
+    "memory_plugin": "astrbot_plugin_livingmemory",
     "browse_enabled": True,
     "share_enabled": True,
     "together_enabled": True,
@@ -66,10 +68,12 @@ def validate(values):
     for key, (low, high) in BOUNDS.items():
         if type(cfg[key]) is not int or not low <= cfg[key] <= high:
             raise ValueError(f"{key} 必须在 {low}—{high} 之间")
-    for key in ("api_base", "owner_umo", "owner_uid", "persona_id", "provider_id"):
+    for key in ("api_base", "owner_umo", "owner_uid", "persona_id", "provider_id", "memory_plugin"):
         if not isinstance(cfg[key], str) or len(cfg[key]) > 250:
             raise ValueError("文本配置无效")
         cfg[key] = cfg[key].strip()
+    if not re.fullmatch(r"[A-Za-z0-9_]{1,120}", cfg["memory_plugin"]):
+        raise ValueError("记忆插件 ID 应为插件名称")
     cfg["api_base"] = cfg["api_base"].rstrip("/")
     u = urlparse(cfg["api_base"])
     if (

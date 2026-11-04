@@ -153,5 +153,15 @@
     "type": "int",
     "description": "同房活动最长时间（分钟）",
     "default": 60
+  },
+  "memory_read_enabled": {
+    "type": "bool",
+    "description": "允许网易云适配器读取记忆（关闭后缓存记忆也不参与选歌）",
+    "default": false
+  },
+  "memory_plugin": {
+    "type": "string",
+    "description": "记忆插件 ID（需支持 recall_behavior_context；可在音乐面板选择）",
+    "default": "astrbot_plugin_livingmemory"
   }
 }

@@ -17,6 +17,11 @@ class Panel:
         self.lock = asyncio.Lock()
         for path, handler, methods in [
             ("status", self.status, ["GET"]),
+            ("preferences/refresh", self.refresh_preferences, ["POST"]),
+            ("preferences/add", self.add_preference, ["POST"]),
+            ("preferences/delete", self.delete_preference, ["POST"]),
+            ("preferences/edit", self.edit_preference, ["POST"]),
+            ("preferences/clear", self.clear_preferences, ["POST"]),
             ("comments", self.comments, ["GET"]),
             ("settings", self.settings, ["POST"]),
             ("login/qr", self.qr, ["POST"]),
@@ -38,6 +43,8 @@ class Panel:
         return json_response(
             {
                 "settings": dict(p.settings),
+                "memory_plugins": p.preferences.memory.providers(),
+                "music_preferences": p.preferences.snapshot(),
                 "configured": bool(p.store.cookie()),
                 "account": p.account_view,
                 "playback": p.service.current,
@@ -51,6 +58,59 @@ class Panel:
                 },
             }
         )
+
+    async def refresh_preferences(self):
+        async with self.lock:
+            if not self.plugin.settings["enabled"]:
+                return json_response({"error": "请先启用网易云适配器"}, status_code=400)
+            return json_response(await self.plugin.preferences.refresh())
+
+    async def add_preference(self):
+        body = await request.json()
+        if not isinstance(body, dict) or set(body) != {"quote", "context", "scope"}:
+            return json_response({"error": "新增参数无效"}, status_code=400)
+        try:
+            async with self.lock:
+                async with self.plugin.preferences.lock:
+                    item = self.plugin.preferences.add(**body)
+            return json_response({"ok": True, "item": item})
+        except ValueError as exc:
+            return json_response({"error": str(exc)}, status_code=400)
+
+    async def delete_preference(self):
+        body = await request.json()
+        if not isinstance(body, dict) or set(body) != {"entry_id", "revision", "scope"}:
+            return json_response({"error": "删除参数无效"}, status_code=400)
+        try:
+            async with self.lock:
+                async with self.plugin.preferences.lock:
+                    self.plugin.preferences.delete(**body)
+            return json_response({"ok": True})
+        except ValueError as exc:
+            return json_response({"error": str(exc)}, status_code=400)
+
+    async def edit_preference(self):
+        body = await request.json()
+        if not isinstance(body, dict) or set(body) != {"entry_id", "quote", "context", "revision", "scope"}:
+            return json_response({"error": "编辑参数无效"}, status_code=400)
+        try:
+            async with self.lock:
+                async with self.plugin.preferences.lock:
+                    item = self.plugin.preferences.edit(**body)
+            return json_response({"ok": True, "item": item})
+        except ValueError as exc:
+            return json_response({"error": str(exc)}, status_code=400)
+
+    async def clear_preferences(self):
+        body = await request.json()
+        if not isinstance(body, dict) or body.get("confirmed") is not True:
+            return json_response({"error": "请先确认清空全部音乐建议"}, status_code=400)
+        async with self.lock:
+            async with self.plugin.preferences.lock:
+                if body.get("scope") != self.plugin.preferences.scope():
+                    return json_response({"error": "会话或人格已改变，请刷新后重试"}, status_code=400)
+                self.plugin.preferences.clear()
+        return json_response({"ok": True})
 
     async def comments(self):
         try:

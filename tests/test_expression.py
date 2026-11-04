@@ -80,3 +80,23 @@ async def test_shared_song_can_be_silent_and_keeps_delivery_receipt(setup):
     svc.notice.assert_not_awaited()
     svc.expression.assert_awaited_once()
     assert api.call.await_args.kwargs['msg']==''
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize('reported_direction',['user_to_bot',''])
+async def test_inverted_or_unconfirmed_expression_never_delivered(tmp_path,behavior,reported_direction):
+    facts={'actor':'bot','direction':'bot_to_user','song':{'id':'101'}}
+    generate=AsyncMock(return_value={'mode':'brief','text':'谢谢你分享给我','action_actor':'user','action_direction':reported_direction})
+    deliver=AsyncMock()
+    policy=ExpressionPolicy(AsyncMock(return_value=behavior),generate,deliver,Store(tmp_path))
+    result=await policy.decide('song_shared',facts)
+    assert result['mode']=='silent'
+    deliver.assert_not_awaited()
+
+@pytest.mark.asyncio
+async def test_outbound_expression_with_confirmed_direction_can_be_delivered(tmp_path,behavior):
+    facts={'actor':'bot','direction':'bot_to_user','song':{'id':'101'}}
+    generate=AsyncMock(return_value={'mode':'brief','text':'挑了首歌给你','action_actor':'bot','action_direction':'bot_to_user'})
+    deliver=AsyncMock(return_value='sent')
+    policy=ExpressionPolicy(AsyncMock(return_value=behavior),generate,deliver,Store(tmp_path))
+    assert (await policy.decide('song_shared',facts))['delivery']=='sent'
+    deliver.assert_awaited_once()
