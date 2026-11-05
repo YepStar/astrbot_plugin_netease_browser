@@ -151,6 +151,7 @@ class MusicService:
             if (status.get("data") or {}).get("inRoom"):
                 return {"status": "room_busy", "reason": "网易云账号已在另一个房间"}
             song = await self.api.detail(sid)
+            queue = list(dict.fromkeys([sid] + [numeric(x) for x in offer.get("queue", [])]))[:8]
             # Preflight audio before creating a room; no hollow host invitations.
             url = await self.api.audio(sid)
             if self.play_task and not self.play_task.done():
@@ -169,6 +170,7 @@ class MusicService:
                     "song_id": sid,
                     "expires": time.time() + self.cfg["invite_ttl_minutes"] * 60,
                     "seq": 1,
+                    "queue": queue,
                     "recipient": uid,
                     "consent_id": consent_id,
                 }
@@ -180,8 +182,8 @@ class MusicService:
                     commandType="REPLACE",
                     userId=self.own_uid,
                     version=1,
-                    displayList=sid,
-                    randomList=sid,
+                    displayList=",".join(queue),
+                    randomList=",".join(queue),
                 )
                 await self.api.call(
                     "listentogether/play/command",
@@ -398,6 +400,7 @@ class MusicService:
             }
 
     def start_audio(self, song, url, origin, key=None, offset=0):
+        self.store.data.pop("queue_advance", None)
         self.audio_stop_reason = None
         self.playback_token = str(time.time_ns())
         self.store.data.pop("pending_song_switch", None)
@@ -453,9 +456,19 @@ class MusicService:
                 )
 
             result = await self.player.play(url, seconds, progress, offset=offset)
+            # Reaching the configured segment limit is not finishing the song.
+            result["complete"] = bool(result["complete"] and song["duration_ms"] > 0 and
+                offset + result["played_seconds"] >= song["duration_ms"] / 1000 - 2)
             self.current["status"] = "finished"
             status = "completed" if result["complete"] else "partial"
             await self.record_audio_result(song, origin, key, result, status)
+            if origin == "together" and result["complete"] and self.room_clock:
+                room = self.store.data.get("room") or {}
+                self.store.data["queue_advance"] = {
+                    "room_id": room.get("id"), "song_id": song["id"],
+                    "command": self.room_clock["command"], "token": aid,
+                }
+                self.store.save()
         except asyncio.CancelledError:
             if result is None:
                 consumed = max(0, self.current["played_seconds"] - offset)
@@ -486,6 +499,62 @@ class MusicService:
         # Tools and the background loop may poll at the same time.
         async with self.room_sync_lock:
             await self._tick_room()
+        await self.advance_room_queue()
+
+    async def prepare_room_queue(self, song, candidates=None):
+        """Use real search results, without reading or changing daily recommendations."""
+        songs = list(candidates or [])
+        if self.cfg["browse_enabled"] and len(songs) < 5:
+            try:
+                songs += await self.api.search(song.get("artists") or song["name"], limit=10)
+            except ApiError:
+                pass  # Keep the valid first song; don't invent a full queue.
+        ids = [numeric(song["id"])]
+        for row in songs:
+            try:
+                sid = numeric(row["id"])
+            except (ValueError, KeyError, TypeError):
+                continue
+            if sid not in ids:
+                ids.append(sid)
+            if len(ids) >= 8:
+                break
+        return ids
+
+    async def advance_room_queue(self):
+        pending = self.store.data.get("queue_advance")
+        room = self.store.data.get("room") or {}
+        if not pending:
+            return
+        if not room or room.get("id") != pending["room_id"]:
+            self.store.data.pop("queue_advance", None)
+            self.store.save()
+            return
+        if not room.get("owned") or not room.get("joined_at") or not self.cfg["room_control_enabled"]:
+            return
+        if (self.current or not self.room_clock or
+                self.room_clock["command"] != pending["command"]):
+            return  # A new remote action takes precedence over a completed track.
+        queue = room.get("queue") or []
+        if pending["song_id"] not in queue:
+            return
+        following = queue[queue.index(pending["song_id"]) + 1:]
+        for sid in following:
+            key = "queue_next:" + pending["token"] + ":" + sid
+            try:
+                result = await self.control("switch", "按一起听歌单继续下一首", key,
+                                            song_id=sid, actor="queue",
+                                            expected_song_id=pending["song_id"])
+            except ApiError as exc:
+                if exc.code == "audio_unavailable_or_trial" and not self.store.receipt(key):
+                    continue  # Nothing was sent; try the next real candidate once.
+                raise
+            if result["status"] in {"applied", "duplicate", "remote_changed"}:
+                self.store.data.pop("queue_advance", None)
+                self.store.save()
+            return
+        self.store.data.pop("queue_advance", None)
+        self.store.save()
 
     def room_progress(self, room_id, command):
         """Estimate from the last *command*, not a live server playback clock.
@@ -629,7 +698,7 @@ class MusicService:
                 {"song": song, "status": "changed", "actor": "other_room_member"},
             )
 
-    async def control(self, action, reason, key, song_id="", actor="user"):
+    async def control(self, action, reason, key, song_id="", actor="user", expected_song_id=None):
         async with self.room_sync_lock, self.lock:
             self.require("together_enabled")
             if not self.cfg["room_control_enabled"]:
@@ -658,9 +727,11 @@ class MusicService:
                 "listentogether/sync/playlist/get", roomId=room["id"]
             )
             command = (remote.get("data") or {}).get("playCommand") or {}
-            if actor == "bot" and command.get("playStatus") == "PAUSE":
+            if actor in {"bot", "queue"} and command.get("playStatus") == "PAUSE":
                 return {"status": "user_paused"}
             former = str(command.get("targetSongId") or "")
+            if expected_song_id and former != expected_song_id:
+                return {"status": "remote_changed"}
             target = numeric(song_id) if action == "switch" else numeric(former)
             song = await self.api.detail(target)
             status = "PAUSE" if action == "pause" else "PLAY"
@@ -679,14 +750,17 @@ class MusicService:
             try:
                 if action == "switch":
                     own = self.own_uid or (await self.account())["uid"]
+                    queue = list(dict.fromkeys(room.get("queue") or [former]))
+                    if target not in queue:
+                        queue.insert(0, target)
                     await self.api.call(
                         "listentogether/sync/list/command",
                         roomId=room["id"],
                         commandType="REPLACE",
                         userId=own,
                         version=room["seq"],
-                        displayList=target,
-                        randomList=target,
+                        displayList=",".join(queue),
+                        randomList=",".join(queue),
                     )
                 result = await self.api.call(
                     "listentogether/play/command",
@@ -713,6 +787,8 @@ class MusicService:
                 self.store.finish(key, "unknown")
                 raise
             room["last_control_actor"] = actor
+            if action == "switch":
+                room["queue"] = queue
             room["last_control_reason"] = reason[:200]
             room["last_control_at"] = time.time()
             self.store.finish(key, "applied")
@@ -728,7 +804,7 @@ class MusicService:
                 play_status=status,
                 updated_at=time.time(),
             )
-            expression = await self.report(
+            expression = {"mode": "silent", "delivery": "silent"} if actor == "queue" else await self.report(
                 "room_control_applied",
                 {
                     "action": action,

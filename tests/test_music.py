@@ -22,6 +22,7 @@ def setup(tmp_path):
     cfg=validate({**DEFAULTS,'owner_uid':'55','owner_umo':'qq_bot:FriendMessage:12'})
     store=Store(tmp_path);store.save_cookie('private_test_cookie')
     api=MagicMock()
+    api.search=AsyncMock(return_value=[])
     api.detail=AsyncMock(return_value=SONG)
     api.audio=AsyncMock(return_value='https://m701.music.126.net/test.mp3')
     api.call=AsyncMock(return_value={'code':200})

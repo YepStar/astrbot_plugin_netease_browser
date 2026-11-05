@@ -12,7 +12,7 @@ async def test_proposal_uses_only_natural_message_without_duplicate_process_text
     natural='这首歌安静得像把时间放慢了，要不要一起来听一会儿？'
     result=await TogetherFlow(cfg,store,svc).propose('101',natural,'proposal')
     assert result['status']=='awaiting_confirmation'
-    svc.notice.assert_awaited_once_with(natural)
+    svc.notice.assert_awaited_once_with(natural.replace('这首歌','《Test》'))
     assert '你答应后' not in svc.notice.await_args.args[0]
     api.call.assert_not_awaited()
 
@@ -20,7 +20,7 @@ async def test_proposal_uses_only_natural_message_without_duplicate_process_text
 async def test_empty_message_has_one_natural_invitation(setup):
     cfg,store,api,svc=setup
     await TogetherFlow(cfg,store,svc).propose('101','','proposal')
-    svc.notice.assert_awaited_once_with('刚听到《Test》，想和你一起听会儿。')
+    svc.notice.assert_awaited_once_with('要不要一起听《Test》？')
     assert svc.notice.await_args.args[0].count('Test')==1
 
 @pytest.mark.asyncio

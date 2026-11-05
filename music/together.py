@@ -1,6 +1,7 @@
 """Durable QQ consent and room lifecycle, separate from the NCM transport."""
 
 import asyncio
+import re
 import time
 import uuid
 
@@ -22,7 +23,7 @@ class TogetherFlow:
             return offer
         return None
 
-    async def propose(self, song_id, message, key, source_event=None):
+    async def propose(self, song_id, message, key, source_event=None, queue_candidates=None):
         async with self.lock:
             self.service.require("together_enabled")
             await self.service.recipient()
@@ -38,10 +39,15 @@ class TogetherFlow:
             if self.store.receipt(key):
                 return self.store.receipt(key)
             song = await self.service.api.detail(song_id)
+            queue = await self.service.prepare_room_queue(song, queue_candidates)
+            text = str(message or "").strip()[:200]
+            text = re.sub(r"[这那](?:一)?首(?:歌|曲子)?", lambda _: f"《{song['name']}》", text)
+            text = text or f"要不要一起听《{song['name']}》？"
             offer = {
                 "id": uuid.uuid4().hex,
                 "song": song,
-                "message": message[:200],
+                "message": text,
+                "queue": queue,
                 "owner_umo": self.cfg["owner_umo"],
                 "recipient": self.cfg["owner_uid"],
                 "source_event": source_event,
@@ -54,7 +60,6 @@ class TogetherFlow:
             self.store.reserve(
                 key, "together_proposal", song_id=song["id"], offer_id=offer["id"]
             )
-            text = message.strip()[:200] or f"刚听到《{song['name']}》，想和你一起听会儿。"
             status = await self.service.notice(text)
             offer["qq_status"] = status
             if status != "sent":
