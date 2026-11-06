@@ -28,7 +28,7 @@ from .music.together import TogetherFlow
 from .web import Panel
 
 
-@register("astrbot_plugin_netease_browser", "YepStar", "网易云适配器", "1.4.1")
+@register("astrbot_plugin_netease_browser", "YepStar", "网易云适配器", "1.4.2")
 class NeteaseBrowser(Star):
     TOOLS = {
         "ncm_search": "browse_enabled",
@@ -253,14 +253,17 @@ class NeteaseBrowser(Star):
                         self.settings["owner_umo"]
                     )
                     if cid:
-                        await manager.add_message_pair(
-                            cid,
-                            {
-                                "role": "user",
-                                "content": "[系统事件：机器人在 " + local_time(time.time())
-                                + " 主动发送网易云活动消息；发送方=机器人，接收方=用户，非用户发言]",
-                            },
-                            {"role": "assistant", "content": text},
+                        conversation = await manager.get_conversation(self.settings["owner_umo"], cid)
+                        history = getattr(conversation, "history", "[]")
+                        if isinstance(history, str):
+                            history = json.loads(history)
+                        if not isinstance(history, list):
+                            raise ValueError("Invalid conversation history; refusing to replace it")
+                        # A bot notice is one assistant message. Never manufacture a
+                        # user turn merely to fit the add_message_pair convenience API.
+                        await manager.update_conversation(
+                            self.settings["owner_umo"], cid,
+                            history=[*history, {"role": "assistant", "content": text}],
                         )
                 except Exception:
                     logger.warning(

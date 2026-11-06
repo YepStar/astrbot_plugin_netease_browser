@@ -210,3 +210,19 @@ async def test_new_invite_tool_reuses_exact_accepted_offer_only_after_preflight_
     assert out['status']=='sent'
     assert plugin.flow.reply.await_args.args[:2]==('accepted',True)
     plugin.flow.propose.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_bot_notice_archive_keeps_existing_roles_without_fabricating_a_user_turn(plugin):
+    old=[{'role':'user','content':'我会取书'}, {'role':'assistant','content':'那我等你'}]
+    manager=plugin.context.conversation_manager
+    manager.get_curr_conversation_id=AsyncMock(return_value='cid')
+    manager.get_conversation=AsyncMock(return_value=SimpleNamespace(history=json.dumps(old)))
+    manager.update_conversation=AsyncMock()
+    manager.add_message_pair=AsyncMock()
+    plugin.context.send_message=AsyncMock(return_value=True)
+    assert await plugin.notice('我选好歌曲了')=='sent'
+    archived=manager.update_conversation.await_args.kwargs['history']
+    assert archived[:2]==old
+    assert archived[2:]==[{'role':'assistant','content':'我选好歌曲了'}]
+    manager.add_message_pair.assert_not_awaited()

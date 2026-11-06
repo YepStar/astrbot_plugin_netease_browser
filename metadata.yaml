@@ -1,7 +1,7 @@
 name: astrbot_plugin_netease_browser
 display_name: 网易云适配器
 desc: 人设自主选曲与真实播放、意图搜索推荐、网易云站内歌曲分享和一起听邀请、评论浏览及发布。QQ仅告知，所有开关和账号绑定可在面板设置。
-version: 1.4.1
+version: 1.4.2
 author: YepStar
 astrbot_version: ">=4.29.1,<5"
 support_platforms:
