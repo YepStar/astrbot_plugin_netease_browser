@@ -12,6 +12,9 @@ MUSIC_REQUEST_GUIDE = (
     "否定、引用举例或讨论能力不执行；不确定对象时澄清。"
     "若当前有pending_song_switch，用户明确说现在换/还是换吧属于listen，可用其中真实歌曲ID调用ncm_listen；否定和含糊回答不算。"
     "第一次切歌应尊重switch_deferred回执的user_reply，同一消息不要重试。"
+    "ncm_invite仅在QQ征求确认，不等于已发送网易云邀请，不得说已经发出或点一下能连接。"
+    "工具回执qq_notice=sent表示QQ话语已经送达，不重复复述user_message；只在确有其他新内容时继续。"
+    "用户已确认但音源预检失败时，新的明确重邀请求沿用原提议，不重新要求确认；unknown不得重试。"
     "歌曲分享不等于机器人播放。只有真实播放回执才能声称开始/听过，不能编造正听着。"
 )
 ACTION_TO_TOOL = {"listen": "ncm_listen", "share": "ncm_share", "together": "ncm_invite"}

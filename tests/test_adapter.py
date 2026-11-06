@@ -2,6 +2,7 @@
 import importlib
 import json
 import sys
+import time
 from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock
@@ -176,3 +177,36 @@ async def test_song_direction_is_restored_in_next_turn_and_scoped(plugin):
     other=SimpleNamespace(system_prompt='other persona')
     await plugin.inject_music_action_facts(event('qq_bot:FriendMessage:88'),other)
     assert other.system_prompt == 'other persona'
+
+class DeliveryEvent(SimpleNamespace):
+    def get_extra(self,key,default=None):return self.extras.get(key,default)
+    def set_extra(self,key,value):self.extras[key]=value
+
+@pytest.mark.asyncio
+async def test_tool_notice_is_delivered_once_and_model_echo_is_empty_before_tts(plugin):
+    from astrbot.core.provider.entities import LLMResponse
+    e=DeliveryEvent(unified_msg_origin=plugin.settings['owner_umo'],message_obj=SimpleNamespace(message_id='dedup'),extras={})
+    plugin.context.send_message=AsyncMock(return_value=True)
+    plugin.context.conversation_manager.get_curr_conversation_id=AsyncMock(return_value=None)
+    token=plugin.interaction.set({'text':'再邀请一次','event':e})
+    try:assert await plugin.notice('一起听《Test》？')=='sent'
+    finally:plugin.interaction.reset(token)
+    response=LLMResponse(role='assistant',completion_text='一起听《Test》？')
+    await plugin.suppress_delivered_notice_echo(e,response)
+    assert response.completion_text==''
+    plugin.context.send_message.assert_awaited_once()
+    assert e.get_extra('_send_message_to_user_current_session_plain_texts')==['一起听《Test》？']
+    response=LLMResponse(role='assistant',completion_text='这是另外一个问题的回答')
+    await plugin.suppress_delivered_notice_echo(e,response)
+    assert response.completion_text=='这是另外一个问题的回答'
+
+@pytest.mark.asyncio
+async def test_new_invite_tool_reuses_exact_accepted_offer_only_after_preflight_failure(plugin):
+    e=event();e.message_str='再邀请我一次';e._ncm_candidates={'101'}
+    plugin.store.data['together_offer']={'id':'accepted','status':'failed','retry_safe':True,'accepted_at':1,'expires_at':time.time()+60,'owner_umo':plugin.settings['owner_umo'],'recipient':'55','song':{'id':'101'},'reply_source_event':'previous'}
+    plugin.flow.reply=AsyncMock(return_value={'status':'sent','channel':'netease_native_invite'})
+    plugin.flow.propose=AsyncMock()
+    out=json.loads(await plugin.run_action(e,'propose',song_id='101',message='再邀请一次'))
+    assert out['status']=='sent'
+    assert plugin.flow.reply.await_args.args[:2]==('accepted',True)
+    plugin.flow.propose.assert_not_awaited()

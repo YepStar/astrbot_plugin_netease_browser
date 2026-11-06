@@ -23,6 +23,24 @@ class TogetherFlow:
             return offer
         return None
 
+    def retryable(self):
+        offer = self.store.data.get("together_offer") or {}
+        if (
+            offer.get("status") == "failed"
+            and offer.get("retry_safe") is True
+            and offer.get("accepted_at")
+            and offer.get("expires_at", 0) > time.time()
+            and offer.get("owner_umo") == self.cfg["owner_umo"]
+            and offer.get("recipient") == self.cfg["owner_uid"]
+            and not self.store.receipt("consented_invite:" + offer.get("id", ""))
+            and not self.store.data.get("room")
+        ):
+            return offer
+        return None
+
+    def replyable(self):
+        return self.pending() or self.retryable()
+
     async def propose(self, song_id, message, key, source_event=None, queue_candidates=None):
         async with self.lock:
             self.service.require("together_enabled")
@@ -42,6 +60,8 @@ class TogetherFlow:
             queue = await self.service.prepare_room_queue(song, queue_candidates)
             text = str(message or "").strip()[:200]
             text = re.sub(r"[这那](?:一)?首(?:歌|曲子)?", lambda _: f"《{song['name']}》", text)
+            if re.search(r"发.{0,8}邀请|点.{0,12}(?:连|进|加入)|(?:已经|已|这就|马上).{0,8}(?:邀请|建房|连上)", text):
+                text = ""
             text = text or f"要不要一起听《{song['name']}》？"
             offer = {
                 "id": uuid.uuid4().hex,
@@ -68,6 +88,8 @@ class TogetherFlow:
             return {
                 "status": "awaiting_confirmation" if status == "sent" else "unknown",
                 "offer_id": offer["id"],
+                "qq_notice": status,
+                "user_message": text if status == "sent" else "",
                 "note": "仅在 QQ 征求确认，尚未创建房间或发送网易云邀请。",
             }
 
@@ -76,13 +98,13 @@ class TogetherFlow:
             self.service.require("together_enabled")
             if self.store.receipt(key):
                 return self.store.receipt(key)
-            offer = self.pending()
+            offer = self.replyable()
             if not offer or offer["id"] != offer_id:
                 return {
                     "status": "no_pending_offer",
                     "note": "提议不存在、已处理或已过期，不发送邀请。",
                 }
-            if not source_event or source_event == offer.get("source_event"):
+            if not source_event or source_event in (offer.get("source_event"), offer.get("reply_source_event")):
                 return {
                     "status": "needs_new_user_reply",
                     "note": "必须等待提议发送后的新一条用户回答，不能在提议的同一轮自行确认。",
@@ -91,6 +113,10 @@ class TogetherFlow:
                 raise ValueError("确认必须为布尔值")
             offer["status"] = "accepted" if accept else "declined"
             offer["replied_at"] = time.time()
+            offer["reply_source_event"] = source_event
+            if accept:
+                offer["accepted_at"] = offer["replied_at"]
+            offer["retry_safe"] = False
             self.store.reserve(
                 key, "together_reply", offer_id=offer_id, accepted=accept
             )
@@ -117,9 +143,14 @@ class TogetherFlow:
                 self.store.finish(key, result["status"])
                 self.store.save()
                 return result
-            except BaseException:
-                offer["status"] = "unknown"
-                self.store.finish(key, "unknown")
+            except BaseException as exc:
+                # No write was reserved: only account/status/detail/audio reads have run.
+                # An uncertain actual invite is never retried, even on a later tool call.
+                safe = not self.store.receipt("consented_invite:" + offer_id) and not self.store.data.get("room")
+                offer["status"] = "failed" if safe else "unknown"
+                offer["retry_safe"] = safe
+                offer["failure_code"] = str(getattr(exc, "code", "unknown"))
+                self.store.finish(key, "failed" if safe else "unknown")
                 raise
 
     async def tick(self):

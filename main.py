@@ -28,7 +28,7 @@ from .music.together import TogetherFlow
 from .web import Panel
 
 
-@register("astrbot_plugin_netease_browser", "YepStar", "网易云适配器", "1.4.0")
+@register("astrbot_plugin_netease_browser", "YepStar", "网易云适配器", "1.4.1")
 class NeteaseBrowser(Star):
     TOOLS = {
         "ncm_search": "browse_enabled",
@@ -199,7 +199,7 @@ class NeteaseBrowser(Star):
             "companion": companion,
             "long_term_memory": memory.get("memories", []),
             "recent_dialogue": recent,
-            "current_user_turn": self.interaction.get(),
+            "current_user_turn": {"text": (self.interaction.get() or {}).get("text", "")},
             "recent_expressions": [
                 row["expression"]
                 for row in list(self.store.data["operations"].values())[-12:]
@@ -238,6 +238,16 @@ class NeteaseBrowser(Star):
             )
             if sent:
                 try:
+                    interaction = self.interaction.get()
+                    event = interaction.get("event") if isinstance(interaction, dict) else None
+                    if event is not None:
+                        # Use AstrBot's native same-session delivery receipt, just like its
+                        # send_message_to_user tool. The respond stage skips an exact echo.
+                        texts = list(event.get_extra("_send_message_to_user_current_session_plain_texts", []) or [])
+                        if text.strip() not in texts:
+                            texts.append(text.strip())
+                        event.set_extra("_send_message_to_user_current_session_plain_texts", texts)
+                        event._ncm_notice_delivered = True
                     manager = self.context.conversation_manager
                     cid = await manager.get_curr_conversation_id(
                         self.settings["owner_umo"]
@@ -261,10 +271,21 @@ class NeteaseBrowser(Star):
             # The NCM operation already succeeded; never replay it due to QQ delivery failure.
             return "unknown"
 
+    @filter.on_llm_response(priority=-2000000)
+    async def suppress_delivered_notice_echo(self, event, response):
+        if not self.allowed(event):
+            return
+        sent = event.get_extra("_send_message_to_user_current_session_plain_texts", [])
+        text = str(getattr(response, "completion_text", "") or "").strip()
+        if text and text in sent and getattr(event, "_ncm_notice_delivered", False):
+            # Before TTS/meme decoration: one delivered message must not become a
+            # second text/voice reply. Distinct follow-up content remains allowed.
+            response.completion_text = ""
+
     def intent_bridge_tool_ready(self, name):
         if not self.settings["enabled"] or not self.store.cookie():
             return False
-        if name == "ncm_reply_together" and not self.flow.pending():
+        if name == "ncm_reply_together" and not self.flow.replyable():
             return False
         if name == "ncm_room_control" and (
             not self.settings["together_enabled"]
@@ -359,10 +380,16 @@ class NeteaseBrowser(Star):
             if action not in ("search", "read"):
                 args["key"] = self.key(event, action)
             token = self.interaction.set(
-                {"text": str(getattr(event, "message_str", ""))[:1200]}
+                {"text": str(getattr(event, "message_str", ""))[:1200], "event": event}
             )
             try:
-                result = await method(**args)
+                retry = self.flow.retryable() if action == "propose" else None
+                if retry and str(args.get("song_id")) == retry["song"]["id"]:
+                    # This new user turn asks to invite again after a read-only preflight
+                    # failure. Keep the exact approved song, queue, and recipient.
+                    result = await self.flow.reply(retry["id"], True, args["key"], args["source_event"])
+                else:
+                    result = await method(**args)
             finally:
                 self.interaction.reset(token)
             if action == "listen":
@@ -379,7 +406,10 @@ class NeteaseBrowser(Star):
             return json.dumps(result, ensure_ascii=False)
         except (ApiError, ValueError) as exc:
             return json.dumps(
-                {"status": "unavailable", "reason": str(exc)}, ensure_ascii=False
+                {"status": "unavailable", "reason": str(exc),
+                 "invitation_sent": False if action in ("propose", "reply") and self.flow.retryable() else None,
+                 "retry_safe": bool(self.flow.retryable()) if action in ("propose", "reply") else False,
+                 "note": "未完成则如实说明；不要说已经发出邀请或点一下即可连接。只有用户新的明确重试请求才再次执行。"}, ensure_ascii=False
             )
         except asyncio.CancelledError:
             raise
@@ -431,12 +461,14 @@ class NeteaseBrowser(Star):
     def intent_bridge_context(self, event):
         if not self.allowed(event):
             return {}
-        offer = self.flow.pending()
+        offer = self.flow.replyable()
         return {
             "pending_offer": {
                 "offer_id": offer["id"],
                 "song": offer["song"],
                 "expires_at": offer["expires_at"],
+                "already_accepted": bool(offer.get("accepted_at")),
+                "retry_safe": offer.get("retry_safe", False),
             }
             if offer
             else None,
@@ -444,7 +476,7 @@ class NeteaseBrowser(Star):
             "pending_song_switch": self.service.pending_switch(),
             "playback": self.service.current,
             "switch_rule": "机器人单独听歌时，第一次要求换歌会提醒先听完；用户下一条明确再次要求换歌，可用pending_song_switch.song.id调用ncm_listen继续，不必重搜。不要把含糊回答、否定或同一条消息重试算作再次要求。",
-            "rule": "仅当当前用户原话接受这份提议时才调用ncm_reply_together accept=true；拒绝用false，等会儿/不确定不发送。已邀请/已进房不是再次确认。",
+            "rule": "若pending_offer.already_accepted和retry_safe为true，这是建房/发送邀请前失败的原已确认提议；当前用户明确要求再邀请时，用ncm_reply_together accept=true重试，不再发QQ确认提议。否则仅当当前用户原话接受这份提议时才调用ncm_reply_together accept=true；拒绝用false，等会儿/不确定不发送。已邀请/已进房不是再次确认。",
         }
 
     @filter.llm_tool(name="ncm_reply_together")
