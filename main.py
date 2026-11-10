@@ -28,7 +28,7 @@ from .music.together import TogetherFlow
 from .web import Panel
 
 
-@register("astrbot_plugin_netease_browser", "YepStar", "网易云适配器", "1.4.7")
+@register("astrbot_plugin_netease_browser", "YepStar", "网易云适配器", "1.4.8")
 class NeteaseBrowser(Star):
     TOOLS = {
         "ncm_search": "browse_enabled",
@@ -127,6 +127,18 @@ class NeteaseBrowser(Star):
                 'ready':bool(self.settings['enabled'] and self.settings['autonomous_enabled'] and self.store.cookie()),
                 'playing':bool(self.service.current or self.store.data.get('room')),
                 'decision_status':self.autonomy.last_status}
+
+    async def third_party_account_status(self):
+        # Explicit UI check only; scheduler heartbeats never trigger login requests.
+        if not self.store.cookie():
+            self.account_view={}
+            return {'login_ready':False,'nickname':'','uid':''}
+        try:self.account_view=await self.service.account()
+        except ApiError as exc:
+            if exc.code not in {'login_expired','not_logged_in','301','302'}:raise
+            self.account_view={}
+            return {'login_ready':False,'nickname':'','uid':''}
+        return {'login_ready':True,**{key:self.account_view.get(key,'') for key in ('nickname','uid')}}
 
     async def third_party_scheduler_acquire(self, owner, ttl=90):
         return await self.scheduler_control.acquire(owner, ttl)

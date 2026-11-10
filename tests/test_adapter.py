@@ -226,3 +226,18 @@ async def test_bot_notice_archive_keeps_existing_roles_without_fabricating_a_use
     assert archived[:2]==old
     assert archived[2:]==[{'role':'assistant','content':'我选好歌曲了'}]
     manager.add_message_pair.assert_not_awaited()
+
+@pytest.mark.asyncio
+async def test_third_party_identity_facade_returns_only_public_identity(plugin):
+    plugin.service.account=AsyncMock(return_value={'uid':'99','nickname':'音乐昵称','cookie':'must-not-escape'})
+    result=await plugin.third_party_account_status()
+    assert result=={'login_ready':True,'uid':'99','nickname':'音乐昵称'}
+    plugin.store.save_cookie('')
+    assert await plugin.third_party_account_status()=={'login_ready':False,'nickname':'','uid':''}
+
+@pytest.mark.asyncio
+async def test_third_party_identity_facade_clears_expired_identity(plugin):
+    plugin.account_view={'nickname':'old account'}
+    plugin.service.account=AsyncMock(side_effect=module.ApiError('login_expired'))
+    assert (await plugin.third_party_account_status())['login_ready'] is False
+    assert plugin.account_view=={}
