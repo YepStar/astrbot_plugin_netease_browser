@@ -1,4 +1,4 @@
-# 网易云适配器
+# 冷月系—网易云音乐
 
 独立的 AstrBot 插件。根据对话意图搜索真实歌曲，在网易云站内分享或邀请一起听；QQ 只发送简短告知。另支持歌曲/歌词/评论浏览、公开评论与回复、人设和陪伴状态驱动的自主选曲与实时音频解码。
 
@@ -173,3 +173,14 @@ QQ 提议只发送模型写的一句自然邀请；没有文案时使用“刚�
 ## 功能与本地配置分离
 
 功能实现、兼容处理和界面改动直接维护在本插件仓库。账号绑定、权限白名单、Provider ID、Cookie、Token及其他私人配置保留在AstrBot本地配置或plugin_data，不纳入源码发布。升级功能源码时保留已有本地配置与数据。
+
+
+## 冷月系插件
+
+本插件与下列插件均由 **YepStar** 创作和维护，属于同一作者的「冷月系」插件系列，各自独立安装并按需组合。
+
+- [冷月系—并行记忆分支](https://github.com/YepStar/astrbot_plugin_memory_branches)：独立记忆空间、总结节点回退与召回。
+- [冷月系—杂项/叠加层](https://github.com/YepStar/astrbot_plugin_misc_adapter)：可选小功能与市场插件叠加层（私有定制仓库）。
+- [冷月系—Zlib知识库](https://github.com/YepStar/astrbot_plugin_zlib_knowledge)：搜书、下载与知识库管理。
+- [冷月系—网易云音乐](https://github.com/YepStar/astrbot_plugin_netease_browser)：歌曲搜索、分享与音乐互动。
+- [冷月系—自然意图分析](https://github.com/YepStar/astrbot_plugin_intent_bridge)：将自然语言转换成可执行的指令与工具调用，让“帮我找本书”“来一首歌”等表达直接触发已接入插件的能力，沿用各插件的权限和确认规则。
