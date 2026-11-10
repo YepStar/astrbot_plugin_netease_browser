@@ -62,3 +62,21 @@ async def test_generic_api_gateway_preserves_native_fields_and_private_cookie(tm
     assert json.loads(body['data'])=={'roomId':'123','acceptorId':'55'}
     assert body['cookie']=='private_cookie'
     assert request['params']['timestamp']
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize('natural,expected', [
+    ('《Test》那首歌里那种旧时光的安静感特别戳人，要不要一起听一会儿？',
+     '《Test》那首歌里那种旧时光的安静感特别戳人，要不要一起听一会儿？'),
+    ('《Test》这样安静，那天听也很喜欢。', '《Test》这样安静，那天听也很喜欢。'),
+    ('那种旧时光的安静很戳人，要不要听这首歌？', '那种旧时光的安静很戳人，要不要听《Test》？'),
+    ('这首歌和那首曲子都不错，先听这首？', '《Test》和那首曲子都不错，先听这首？'),
+    ('要不要一起听那一首曲子？', '要不要一起听《Test》？'),
+])
+async def test_proposal_preserves_named_song_and_only_expands_one_real_reference(setup, natural, expected):
+    cfg, store, api, svc = setup
+    result = await TogetherFlow(cfg, store, svc).propose('101', natural, 'reference')
+    svc.notice.assert_awaited_once_with(expected)
+    assert result['user_message'] == expected
+    assert store.data['together_offer']['message'] == expected
+    assert expected.count('《Test》') == 1

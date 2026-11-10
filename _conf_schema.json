@@ -121,7 +121,7 @@
   },
   "max_listen_seconds": {
     "type": "int",
-    "description": "单首最多播放秒数",
+    "description": "独立听歌单首最多播放秒数（同房不截断）",
     "default": 600
   },
   "offer_ttl_minutes": {
@@ -151,7 +151,7 @@
   },
   "room_session_minutes": {
     "type": "int",
-    "description": "同房活动最长时间（分钟）",
+    "description": "用户离房后保留房间时长（分钟）",
     "default": 60
   },
   "memory_read_enabled": {

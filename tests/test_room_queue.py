@@ -74,15 +74,17 @@ def queued_room(setup):
 
 
 @pytest.mark.asyncio
-async def test_automatic_next_preserves_queue_and_sends_no_qq_message(queued_room):
+async def test_automatic_next_preserves_queue_and_uses_model_expression(queued_room):
     cfg, store, api, svc, command = queued_room
-    svc.report = AsyncMock()
+    svc.report = AsyncMock(return_value={'mode':'silent','delivery':'silent'})
     await svc.advance_room_queue()
     await svc.play_task
     assert command['targetSongId'] == '202'
     change = next(c.kwargs for c in api.call.await_args_list if c.args[0] == 'listentogether/sync/list/command')
     assert change['displayList'] == '101,202,303'
-    svc.report.assert_not_awaited()
+    svc.report.assert_awaited_once()
+    assert svc.report.await_args.args[0] == 'queue_song_advanced'
+    assert svc.report.await_args.args[1]['change_origin'] == 'natural_next'
     assert store.data['room']['queue'] == ['101', '202', '303']
 
 

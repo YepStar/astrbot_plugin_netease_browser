@@ -21,3 +21,12 @@ journal.json
 /data/
 /plugin_data/
 /work/
+
+data/
+plugin_data/
+private/
+*cookie*
+*credential*
+local_config.json
+*.db
+*.db-*

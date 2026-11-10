@@ -86,7 +86,7 @@ async def test_join_detects_bound_uid_and_extends_pending_expiry(setup):
     api.call.side_effect=call
     await svc.tick_room()
     assert store.data['room']['joined_at']>0
-    assert store.data['room']['expires']>time.time()
+    assert 'expires' not in store.data['room']
     await svc.tick_room();assert svc.notice.await_count==0
 
 @pytest.mark.asyncio

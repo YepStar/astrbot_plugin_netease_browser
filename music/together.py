@@ -59,7 +59,12 @@ class TogetherFlow:
             song = await self.service.api.detail(song_id)
             queue = await self.service.prepare_room_queue(song, queue_candidates)
             text = str(message or "").strip()[:200]
-            text = re.sub(r"[这那](?:一)?首(?:歌|曲子)?", lambda _: f"《{song['name']}》", text)
+            # Only an actual song reference can be expanded. Bare 这/那 also
+            # occur in 那种、这样、那天 and must never become a song title.
+            # Preserve the model's wording when it already names this song.
+            title = f"《{song['name']}》"
+            if title not in text:
+                text = re.sub(r"[这那](?:一)?首(?:歌|曲子)?", lambda _: title, text, count=1)
             if re.search(r"发.{0,8}邀请|点.{0,12}(?:连|进|加入)|(?:已经|已|这就|马上).{0,8}(?:邀请|建房|连上)", text):
                 text = ""
             text = text or f"要不要一起听《{song['name']}》？"

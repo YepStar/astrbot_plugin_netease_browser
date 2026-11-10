@@ -8,6 +8,7 @@ from urllib.parse import parse_qs, unquote, urlparse
 
 from .api import ApiError
 from .facts import outbound_share
+from .policy import comment_block_reason, normalized, recent_songs
 
 
 def numeric(value):
@@ -294,7 +295,7 @@ class MusicService:
                 return {"status": "accepted", "room_id": rid}
             return {"status": "no_invitation", "reason": "未找到绑定用户发来的有效邀请"}
 
-    async def comment(self, song_id, content, reply_id, key):
+    async def comment(self, song_id, content, reply_id, key, origin="requested"):
         async with self.lock:
             self.require("comments_enabled")
             sid = numeric(song_id)
@@ -302,6 +303,14 @@ class MusicService:
                 raise ValueError("评论应为 1—500 字")
             if self.store.receipt(key):
                 return self.store.receipt(key)
+            if origin == "autonomous":
+                self.require("autonomous_enabled")
+                self.require("autonomous_comment")
+                reason = comment_block_reason(self.store, sid, content)
+                if reason:
+                    self.store.reserve(key, "comment", song_id=sid, origin=origin, content=content)
+                    self.store.finish(key, "suppressed", reason=reason)
+                    return {"status": "suppressed", "reason": reason}
             song = await self.api.detail(sid)
             params = {
                 "id": sid,
@@ -321,9 +330,19 @@ class MusicService:
                 )
                 if not (thread.get("data") or {}).get("ownerComment"):
                     raise ValueError("未找到目标评论")
+            if origin == "autonomous":
+                self.require("comments_enabled")
+                self.require("autonomous_enabled")
+                self.require("autonomous_comment")
+                reason = comment_block_reason(self.store, sid, content)
+                if reason:
+                    self.store.reserve(key, "comment", song_id=sid, origin=origin, content=content)
+                    self.store.finish(key, "suppressed", reason=reason)
+                    return {"status": "suppressed", "reason": reason}
             self.store.reserve(
                 key,
                 "comment",
+                origin=origin,
                 song_id=sid,
                 song=song,
                 content=content,
@@ -358,6 +377,8 @@ class MusicService:
                 if previous.get("status") == "switch_deferred":
                     return {"status": "switch_deferred", "user_reply": previous["user_reply"], "song": previous.get("song"), "duplicate": True}
                 return self.store.receipt(key)
+            if origin == "autonomous" and sid in recent_songs(self.store)[0]:
+                return {"status": "recently_played", "note": "最近24小时已听过，本轮不自主重播。"}
             busy = bool(self.play_task and not self.play_task.done())
             if busy and self.current and self.current.get("status") == "finished":
                 await asyncio.gather(self.play_task, return_exceptions=True)
@@ -387,6 +408,8 @@ class MusicService:
                 switching = pending["first_request_key"] != key
             # Confirm that the new song is playable before interrupting the old one.
             song = await self.api.detail(sid)
+            if origin == "autonomous" and normalized(song.get("name", "")) in recent_songs(self.store)[1]:
+                return {"status": "recently_played", "note": "最近24小时已听过同名歌曲，本轮换一首。"}
             url = await self.api.audio(sid)
             if switching:
                 await self.stop_audio()
@@ -441,10 +464,10 @@ class MusicService:
         }
         aid = "netease:" + str(time.time_ns())
         user_id = self.cfg["owner_umo"].split(":")[-1]
-        seconds = min(
-            max(1, (song["duration_ms"] / 1000 or 180) - offset),
-            self.cfg["max_listen_seconds"],
-        )
+        remaining = max(1, (song["duration_ms"] / 1000 or 180) - offset)
+        # A limit on standalone listening must not silently stop a long track
+        # while both people are still listening in the same room.
+        seconds = remaining if origin == "together" else min(remaining, self.cfg["max_listen_seconds"])
         result = None
         try:
             self.companion.activity("started", aid, user_id, song, played_seconds=0)
@@ -584,7 +607,7 @@ class MusicService:
     async def _tick_room(self):
         if not self.cfg["enabled"] or not self.cfg["together_enabled"]:
             if self.store.data.get("room"):
-                await self.end_room()
+                await self.end_room(reason="feature_disabled")
             return
         room = self.store.data.get("room")
         if not room:
@@ -604,25 +627,30 @@ class MusicService:
                 await self.stop_audio(reason="room_left")
             return
         members = {str(u.get("userId")) for u in actual.get("roomUsers", [])}
-        if self.cfg["owner_uid"] in members and not room.get("joined_at"):
-            room["joined_at"] = time.time()
-            room["expires"] = time.time() + self.cfg["room_session_minutes"] * 60
+        now = time.time()
+        owner_present = self.cfg["owner_uid"] in members
+        if owner_present:
+            first_join = not room.get("joined_at")
+            room["joined_at"] = room.get("joined_at") or now
+            room.pop("expires", None)  # Also migrate persisted legacy session TTL.
+            room.pop("owner_absent_since", None)
             self.store.save()
-            await self.report(
-                "owner_joined", {"room_id": room["id"], "status": "joined"}
-            )
-        if room.get("expires") and time.time() > room["expires"]:
-            waiting = not room.get("joined_at")
-            await self.end_room()
-            if waiting:
-                await self.report(
-                    "waiting_room_closed",
-                    {
-                        "room_id": room["id"],
-                        "status": "closed",
-                        "reason": "等待入房超时",
-                    },
-                )
+            if first_join:
+                await self.report("owner_joined", {"room_id": room["id"], "status": "joined"})
+        elif room.get("joined_at"):
+            # Pausing music is still being together. Only actual member absence
+            # starts cleanup, and a return cancels that deadline.
+            room.setdefault("owner_absent_since", now)
+            room.pop("expires", None)
+            self.store.save()
+            if now - room["owner_absent_since"] >= self.cfg["room_session_minutes"] * 60:
+                await self.end_room(reason="owner_absent_timeout")
+                return
+        elif room.get("expires") and now > room["expires"]:
+            await self.end_room(reason="waiting_timeout")
+            await self.report("waiting_room_closed", {
+                "room_id": room["id"], "status": "closed", "reason": "等待入房超时",
+            })
             return
         playlist = await self.api.call(
             "listentogether/sync/playlist/get", roomId=room["id"]
@@ -693,10 +721,27 @@ class MusicService:
                 progress=heartbeat_progress,
             )
         if song and old_sid and sid != old_sid:
-            await self.report(
-                "remote_song_changed",
-                {"song": song, "status": "changed", "actor": "other_room_member"},
+            completed = any(
+                row.get("origin") == "together" and row.get("complete") is True
+                and (row.get("song") or {}).get("id") == old_sid
+                and row.get("at", 0) >= old.get("updated_at", 0) - self.cfg["poll_seconds"] * 2
+                for row in self.store.data.get("observations", [])[-3:]
             )
+            await self.report("remote_song_changed", {
+                "song": song, "previous_song": old.get("song"), "status": "changed",
+                "actor": "remote_unknown", "play_status": status,
+                "change_origin": "natural_next" if completed else "remote_unclassified",
+                "listening_confirmed": bool(self.current and self.current.get("id") == sid
+                                             and self.current.get("played_seconds", 0) > 0),
+            })
+        elif song and old_sid and old.get("play_status") != status:
+            await self.report("remote_playback_changed", {
+                "song": song, "status": "changed", "play_status": status,
+                "action": "pause" if status == "PAUSE" else "resume",
+                "actor": "remote_unknown", "change_origin": "remote_unclassified",
+                "listening_confirmed": bool(status == "PLAY" and self.current
+                                             and self.current.get("played_seconds", 0) > 0),
+            })
 
     async def control(self, action, reason, key, song_id="", actor="user", expected_song_id=None):
         async with self.room_sync_lock, self.lock:
@@ -733,6 +778,7 @@ class MusicService:
             if expected_song_id and former != expected_song_id:
                 return {"status": "remote_changed"}
             target = numeric(song_id) if action == "switch" else numeric(former)
+            previous_song = (self.room_snapshot.get("song") or {})
             song = await self.api.detail(target)
             status = "PAUSE" if action == "pause" else "PLAY"
             progress = 0 if action == "switch" else int(command.get("progress") or 0)
@@ -804,14 +850,19 @@ class MusicService:
                 play_status=status,
                 updated_at=time.time(),
             )
-            expression = {"mode": "silent", "delivery": "silent"} if actor == "queue" else await self.report(
-                "room_control_applied",
+            expression = await self.report(
+                "queue_song_advanced" if actor == "queue" else "room_control_applied",
                 {
                     "action": action,
                     "status": "applied",
                     "song": song,
                     "internal_reason": reason[:200],
                     "actor": actor,
+                    "previous_song": previous_song,
+                    "play_status": status,
+                    "change_origin": {"queue": "natural_next", "user": "user_requested", "bot": "bot_requested"}.get(actor, "unknown"),
+                    "listening_confirmed": bool(status == "PLAY" and self.current
+                                                 and self.current.get("played_seconds", 0) > 0),
                 },
                 key,
             )
@@ -824,12 +875,20 @@ class MusicService:
                 "expression": expression,
             }
 
-    async def end_room(self):
+    async def end_room(self, reason="user_requested"):
         async with self.lock:
             room = self.store.data.get("room")
             if not room:
                 return {"status": "not_in_room"}
-            await self.api.call("listentogether/end", roomId=room["id"])
+            key = "room_end:" + room["id"] + ":" + str(time.time_ns())
+            self.store.reserve(key, "room_end", room_id=room["id"], reason=reason,
+                               joined_at=room.get("joined_at"), owner_absent_since=room.get("owner_absent_since"))
+            try:
+                await self.api.call("listentogether/end", roomId=room["id"])
+            except BaseException:
+                self.store.finish(key, "unknown")
+                raise
+            self.store.finish(key, "ended")
             self.store.data["room"] = None
             self.store.save()
             self.room_snapshot = {}

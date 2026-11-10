@@ -28,7 +28,7 @@ from .music.together import TogetherFlow
 from .web import Panel
 
 
-@register("astrbot_plugin_netease_browser", "YepStar", "网易云适配器", "1.4.2")
+@register("astrbot_plugin_netease_browser", "YepStar", "网易云适配器", "1.4.6")
 class NeteaseBrowser(Star):
     TOOLS = {
         "ncm_search": "browse_enabled",
@@ -91,11 +91,8 @@ class NeteaseBrowser(Star):
             *(t for t in (self.task, self.auto_task) if t), return_exceptions=True
         )
         await self.service.stop_audio()
-        # Preserve owned-room TTL for recovery instead of claiming a failed close succeeded.
-        try:
-            await self.service.end_room()
-        except Exception:
-            pass
+        # A plugin reload/restart is not a request to end the remote room.
+        # Persisted room state is reconciled with NCM status on the next poll.
         await self.api.close()
 
     async def loop(self):
@@ -134,6 +131,8 @@ class NeteaseBrowser(Star):
         provider = self.settings[
             "provider_id"
         ] or await self.context.get_current_chat_provider_id(self.settings["owner_umo"])
+        if phase == "public_comment":
+            prompt += "\n当前是网易云公开歌曲评论，不是QQ私聊。只表达对歌曲/歌词的具体看法；禁止恋人邀约、一起听提议、要求用户回应或私人关系话术。无合适内容时content为空，不编造音色听感。"
         response = await asyncio.wait_for(
             self.context.llm_generate(
                 chat_provider_id=provider,
@@ -200,11 +199,15 @@ class NeteaseBrowser(Star):
             "long_term_memory": memory.get("memories", []),
             "recent_dialogue": recent,
             "current_user_turn": {"text": (self.interaction.get() or {}).get("text", "")},
-            "recent_expressions": [
-                row["expression"]
-                for row in list(self.store.data["operations"].values())[-12:]
-                if "expression" in row
-            ],
+            "recent_expressions": sorted(
+                [row for row in self.store.data.get("expression_history", [])
+                 if row.get("text") and row.get("delivery") == "sent"]
+                + [{"at": row.get("at", 0), **row["expression"]}
+                   for row in self.store.data["operations"].values()
+                   if row.get("expression", {}).get("text")
+                   and row["expression"].get("delivery") == "sent"],
+                key=lambda row: row.get("at", 0),
+            )[-12:],
         }
 
     async def deliver_expression(self, text, scope):
