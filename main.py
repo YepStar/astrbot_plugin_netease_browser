@@ -79,6 +79,8 @@ class NeteaseBrowser(Star):
         self.account_view = {}
         self.task = None
         self.auto_task = None
+        from .music.scheduler_control import SchedulerControl
+        self.scheduler_control = SchedulerControl(self.store.root)
 
     async def initialize(self):
         self.task = asyncio.create_task(self.loop())
@@ -110,12 +112,29 @@ class NeteaseBrowser(Star):
                                     "NCM autonomous activity failed: %s",
                                     type(error).__name__,
                                 )
-                        self.auto_task = asyncio.create_task(self.autonomy.tick())
+                        self.auto_task = asyncio.create_task(self.scheduler_control.local(self))
             except asyncio.CancelledError:
                 raise
             except Exception as exc:
                 logger.warning("NCM background check failed: %s", type(exc).__name__)
             await asyncio.sleep(self.settings["poll_seconds"])
+
+    third_party_scheduler_api = 1
+
+    async def third_party_scheduler_status(self):
+        return {**self.scheduler_control.lease(),
+                'ready':bool(self.settings['enabled'] and self.settings['autonomous_enabled'] and self.store.cookie()),
+                'playing':bool(self.service.current or self.store.data.get('room')),
+                'decision_status':self.autonomy.last_status}
+
+    async def third_party_scheduler_acquire(self, owner, ttl=90):
+        return await self.scheduler_control.acquire(owner, ttl)
+
+    async def third_party_scheduler_release(self, owner):
+        await self.scheduler_control.release(owner)
+
+    async def third_party_scheduler_run(self, owner, key):
+        return await self.scheduler_control.run(self, owner, key)
 
     async def generate(self, phase, data):
         persona = await self.context.persona_manager.get_persona(
