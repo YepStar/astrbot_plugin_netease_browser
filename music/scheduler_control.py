@@ -1,4 +1,7 @@
 """Public scheduler facade v1: durable lease + serialized autonomy, not playback ownership."""
+from contextvars import ContextVar
+PUBLICATION_GATE=ContextVar("third_party_publication_gate",default=None)
+
 import asyncio
 import sqlite3
 import time
@@ -43,7 +46,7 @@ class SchedulerControl:
             # Room lifecycle and already-confirmed together-listening remain with music.
             if plugin.store.data.get('room') or self.lease()['owner']=='music':
                 await plugin.autonomy.tick()
-    async def run(self,plugin,owner,key):
+    async def run(self,plugin,owner,key,publication_gate=None):
         if owner!=OWNER or not isinstance(key,str) or not 1<=len(key)<=200:raise ValueError('invalid_scheduled_run')
         async with self.lock:
             if self.lease()['owner']!=owner:return {'state':'failed','code':'lease_expired'}
@@ -56,11 +59,13 @@ class SchedulerControl:
                     return {'state':'failed','code':'already_listening'}
                 db.execute("INSERT INTO runs VALUES(?,'executing',?,'')",(key,self.clock()))
             state,code='unknown','interrupted'
+            token=PUBLICATION_GATE.set(publication_gate)
             try:
                 await plugin.autonomy.tick()
                 state,code='succeeded','decision_processed' # Not a claim that audio playback started.
             except asyncio.CancelledError:raise
             except Exception as exc:code=type(exc).__name__
             finally:
+                PUBLICATION_GATE.reset(token)
                 with self.connect() as db:db.execute('UPDATE runs SET state=?,code=? WHERE key=?',(state,code,key))
             return {'state':state,'code':code}

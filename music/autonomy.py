@@ -7,6 +7,7 @@ from datetime import datetime
 from zoneinfo import ZoneInfo
 
 from .policy import comment_block_reason, normalized, recent_songs
+from .scheduler_control import PUBLICATION_GATE
 
 
 class Autonomy:
@@ -237,6 +238,10 @@ class Autonomy:
             self.store.save()
             action = response.get("action")
             if action not in allowed or action == "none":
+                return
+            gate=PUBLICATION_GATE.get()
+            if gate is not None and await gate(action,song,source) is not True:
+                self.last_status='未通过第三方平台统一评分，本轮不分享或评论'
                 return
             if action == "comment" and self.cfg["autonomous_comment"]:
                 # Generate in a separate public-audience context. Never reuse private text.

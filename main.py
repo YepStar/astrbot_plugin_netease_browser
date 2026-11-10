@@ -120,9 +120,10 @@ class NeteaseBrowser(Star):
             await asyncio.sleep(self.settings["poll_seconds"])
 
     third_party_scheduler_api = 1
+    third_party_scheduler_filter_api = 1
 
     async def third_party_scheduler_status(self):
-        return {**self.scheduler_control.lease(),
+        return {**self.scheduler_control.lease(),'publication_filter_api':1,
                 'ready':bool(self.settings['enabled'] and self.settings['autonomous_enabled'] and self.store.cookie()),
                 'playing':bool(self.service.current or self.store.data.get('room')),
                 'decision_status':self.autonomy.last_status}
@@ -133,8 +134,8 @@ class NeteaseBrowser(Star):
     async def third_party_scheduler_release(self, owner):
         await self.scheduler_control.release(owner)
 
-    async def third_party_scheduler_run(self, owner, key):
-        return await self.scheduler_control.run(self, owner, key)
+    async def third_party_scheduler_run(self, owner, key, publication_gate=None):
+        return await self.scheduler_control.run(self, owner, key, publication_gate=publication_gate)
 
     async def generate(self, phase, data):
         persona = await self.context.persona_manager.get_persona(

@@ -57,3 +57,18 @@ def test_heartbeat_can_renew_while_external_decision_is_running(tmp_path):
   stamp[0]=135;assert ctl.lease()['owner']==m.OWNER
   release.set();await task
  asyncio.run(run())
+
+
+def test_publication_filter_is_scoped_to_external_decision_and_reset(tmp_path):
+ async def run():
+  ctl=m.SchedulerControl(tmp_path);p=plugin();seen=[]
+  async def tick():
+   gate=m.PUBLICATION_GATE.get();seen.append(gate)
+   if gate is not None:assert await gate('share',{'id':1},{}) is False
+  p.autonomy.tick=tick;gate=AsyncMock(return_value=False)
+  await ctl.acquire(m.OWNER)
+  await ctl.run(p,m.OWNER,'filtered',publication_gate=gate)
+  gate.assert_awaited_once();assert m.PUBLICATION_GATE.get() is None
+  await ctl.release(m.OWNER);await ctl.local(p)
+  assert seen==[gate,None]
+ asyncio.run(run())
